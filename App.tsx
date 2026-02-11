@@ -297,7 +297,7 @@ function App() {
              </div>
           </td>
           <td className="py-1 px-2 text-right align-middle">
-            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{isIncoming ? '↓' : '↑'}{formatNum(tx.qty)}</span>
+            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty)}</span>
             <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
           </td>
           {isIncoming && showValues && <td className="py-1 px-2 text-right text-xs font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)} Dhs` : '-'}</td>}
