@@ -142,19 +142,14 @@ function App() {
 
     transactions.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
-        // Apply filter constraints before adding to aggregate stock calculation
         const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
         const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
         
         if (matchesEnt && matchesCli) {
-           // Key changes based on whether we are viewing a specific selection (aggregate totals)
-           // or all stock (detailed breakdown)
            let invKey: string;
            if (isFiltered) {
-             // Total for the specific filter selection
              invKey = `${t.product}_${t.unit}`;
            } else {
-             // Detailed totals by entreprise and client
              invKey = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`;
            }
 
@@ -254,6 +249,10 @@ function App() {
     doc.setTextColor(0, 0, 0);
     
     let currentY = 55;
+    const pdfFontSize = showValues ? 8 : 9;
+
+    const totalInventoryValue = inventory.reduce((sum, item) => sum + (item.totalValueDhs || 0), 0);
+
     doc.setFontSize(14);
     doc.setFont("helvetica", "bold");
     doc.text("STOCK DISPONIBLE", 14, currentY);
@@ -261,28 +260,42 @@ function App() {
       startY: currentY + 5,
       head: [['Produit', 'Client', 'Entreprise', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
       body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
+      foot: showValues ? [['TOTAL', '', '', '', '', formatNum(totalInventoryValue)]] : undefined,
       theme: 'grid',
-      headStyles: { fillColor: [30, 64, 175] }
+      headStyles: { fillColor: [30, 64, 175] },
+      footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
+      styles: { fontSize: pdfFontSize }
     });
     
     if (includeHistory) {
+      const totalInValue = inTxs.reduce((sum, tx) => sum + (tx.valueDhs || 0), 0);
+
       currentY = (doc as any).lastAutoTable.finalY + 15;
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
       doc.text("ENTRÉES", 14, currentY);
       autoTable(doc, {
         startY: currentY + 5,
         head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Réf', ...(showValues ? ['Valeur (Dhs)'] : [])]],
         body: inTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-', ...(showValues ? [t.valueDhs !== undefined ? formatNum(t.valueDhs) : '-'] : [])]),
+        foot: showValues ? [['TOTAL', '', '', '', '', '', '', formatNum(totalInValue)]] : undefined,
         theme: 'grid',
-        headStyles: { fillColor: [21, 128, 61] }
+        headStyles: { fillColor: [21, 128, 61] },
+        footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
+        styles: { fontSize: pdfFontSize }
       });
+
       currentY = (doc as any).lastAutoTable.finalY + 15;
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
       doc.text("SORTIES", 14, currentY);
       autoTable(doc, {
         startY: currentY + 5,
         head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Entrée Réf']],
         body: outTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-']),
         theme: 'grid',
-        headStyles: { fillColor: [185, 28, 28] }
+        headStyles: { fillColor: [185, 28, 28] },
+        styles: { fontSize: pdfFontSize }
       });
     }
     doc.save(`Rapport_Stock_${dateStr}.pdf`);
