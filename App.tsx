@@ -30,13 +30,12 @@ function App() {
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   
-  // Real-time Subscriptions
   useEffect(() => {
     const unsubTx = subscribeTransactions((data) => {
       setTransactions(data);
       setLoading(false);
     });
-    const unsubProd = subscribeProducts(() => {}); // Logic handled in service seeding
+    const unsubProd = subscribeProducts(() => {}); 
     const unsubEnt = subscribeEntreprises(setEntreprisesList);
     const unsubCli = subscribeClients(setClientsList);
 
@@ -116,7 +115,20 @@ function App() {
     setAppliedFilters({ entreprise: 'ALL', client: 'ALL', lot: '', dateRange: { from: start, to: todayStr } });
   };
 
-  const { inTxs, outTxs, inventory } = useMemo(() => {
+  const getExpiryStatus = (expiryDate?: string) => {
+    if (!expiryDate) return null;
+    const now = new Date();
+    now.setHours(0,0,0,0);
+    const exp = new Date(expiryDate);
+    exp.setHours(0,0,0,0);
+    const diffDays = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (diffDays < 30) return 'red';
+    if (diffDays <= 45) return 'yellow';
+    return 'ok';
+  };
+
+  const { inTxs, outTxs, inventory, headerAlert } = useMemo(() => {
     let txs = transactions;
     if (appliedFilters.entreprise !== 'ALL') txs = txs.filter(t => t.entreprise === appliedFilters.entreprise);
     if (appliedFilters.client !== 'ALL') txs = txs.filter(t => t.client === appliedFilters.client);
@@ -128,9 +140,16 @@ function App() {
     const invMap = new Map<string, InventoryItem & { unitPrice?: number }>();
     txs.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
-        const invKey = `${t.product}_${t.unit}_${t.client || 'AUCUN'}_${t.lot || 'AUCUN'}`;
+        const invKey = `${t.product}_${t.unit}_${t.client || 'AUCUN'}_${t.lot || 'AUCUN'}_${t.entreprise || 'AUCUNE'}`;
         if (!invMap.has(invKey)) {
-          invMap.set(invKey, { product: t.product, lot: t.lot || '', unit: t.unit, availableQty: 0, client: t.client });
+          invMap.set(invKey, { 
+            product: t.product, 
+            lot: t.lot || '', 
+            unit: t.unit, 
+            availableQty: 0, 
+            client: t.client,
+            entreprise: t.entreprise
+          });
         }
         const item = invMap.get(invKey)!;
         if (t.type === TransactionType.IN) {
@@ -148,6 +167,17 @@ function App() {
 
     const inTxs = displayTxs.filter(t => t.type === TransactionType.IN);
     const outTxs = displayTxs.filter(t => t.type === TransactionType.OUT);
+    
+    const allIn = transactions.filter(t => t.type === TransactionType.IN);
+    let hasRed = false;
+    let hasYellow = false;
+    allIn.forEach(t => {
+      const status = getExpiryStatus(t.expiryDate);
+      if (status === 'red') hasRed = true;
+      if (status === 'yellow') hasYellow = true;
+    });
+    const headerAlert = hasRed ? 'red' : (hasYellow ? 'yellow' : null);
+
     const displayInv = Array.from(invMap.values())
       .filter(item => item.availableQty !== 0)
       .map(item => {
@@ -156,7 +186,7 @@ function App() {
       })
       .sort((a, b) => a.product.localeCompare(b.product));
 
-    return { inTxs, outTxs, inventory: displayInv };
+    return { inTxs, outTxs, inventory: displayInv, headerAlert };
   }, [transactions, appliedFilters]);
 
   const formatNum = (num: number) => {
@@ -166,6 +196,7 @@ function App() {
   };
 
   const formatDate = (dateStr: string) => {
+    if (!dateStr) return '-';
     const [y, m, d] = dateStr.split('-');
     return `${d}/${m}/${y}`;
   };
@@ -173,8 +204,8 @@ function App() {
   const handleExportExcel = () => {
     let csvContent = "\uFEFF"; 
     const sep = ";";
-    csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;CLIENT;DUM REF;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
-    inventory.forEach(item => { csvContent += `${item.product}${sep}${item.client || ''}${sep}${item.lot || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; });
+    csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;ENTREPRISE;CLIENT;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
+    inventory.forEach(item => { csvContent += `${item.product}${sep}${item.entreprise || ''}${sep}${item.client || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; });
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -207,8 +238,8 @@ function App() {
     doc.text("STOCK DISPONIBLE", 14, currentY);
     autoTable(doc, {
       startY: currentY + 5,
-      head: [['Produit', 'Client', 'DUM Réf', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
-      body: inventory.map(i => [i.product, i.client || '-', i.lot || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
+      head: [['Produit', 'Client', 'Entreprise', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
+      body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
       theme: 'grid',
       headStyles: { fillColor: [30, 64, 175] }
     });
@@ -236,34 +267,46 @@ function App() {
     doc.save(`Rapport_Stock_${dateStr}.pdf`);
   };
 
-  const bgIn = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322c55e' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M12 4v4m0 0-2-2m2 2 2-2'/%3E%3C/svg%3E\")";
-  const bgOut = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M12 8V4m0 0-2 2m2-2 2 2'/%3E%3C/svg%3E\")";
-  const bgStock = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M7.5 4.21l4.5 2.6 4.5-2.6'/%3E%3Cpath d='M7.5 19.79v-5.2L3 12'/%3E%3Cpath d='M21 12l-4.5 2.6v5.2'/%3E%3C/svg%3E\")";
-
   const renderTxRows = (txs: Transaction[], isIncoming: boolean) => {
     if (txs.length === 0) return <tr><td colSpan={isIncoming && showValues ? 5 : 4} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>;
-    return txs.map((tx) => (
-      <tr key={tx.id} className="hover:bg-gray-100 dark:hover:bg-gray-700/50 border-b border-gray-100 dark:border-gray-800/60 group transition-colors">
-        <td className="py-1 px-2 text-gray-600 dark:text-gray-400 align-middle whitespace-nowrap">{formatDate(tx.date)}</td>
-        <td className="py-1 px-2 align-middle">
-           <div className="flex items-center gap-2">
-             <div className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full ${isIncoming ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>{isIncoming ? '↓' : '↑'}</div>
-             <div className="flex flex-col">
-                <div className="font-bold text-gray-800 dark:text-gray-200 leading-tight truncate">{tx.product}</div>
-                {tx.lot && <div className="text-[10px] text-gray-500 font-medium">Réf: {tx.lot}</div>}
+    return txs.map((tx) => {
+      const expiryStatus = isIncoming ? getExpiryStatus(tx.expiryDate) : null;
+      let rowStyle = "";
+      if (expiryStatus === 'red') rowStyle = "bg-red-50 dark:bg-red-900/20";
+      if (expiryStatus === 'yellow') rowStyle = "bg-yellow-50 dark:bg-yellow-900/10";
+
+      return (
+        <tr key={tx.id} className={`${rowStyle} hover:bg-gray-100 dark:hover:bg-gray-700/50 border-b border-gray-100 dark:border-gray-800/60 group transition-colors`}>
+          <td className="py-1 px-2 text-gray-600 dark:text-gray-400 align-middle whitespace-nowrap">
+            <div className="flex flex-col">
+              <span>{formatDate(tx.date)}</span>
+              {isIncoming && tx.expiryDate && (
+                <span className={`text-[9px] font-bold ${expiryStatus === 'red' ? 'text-red-600' : 'text-yellow-600'}`}>
+                   Exp: {formatDate(tx.expiryDate)}
+                </span>
+              )}
+            </div>
+          </td>
+          <td className="py-1 px-2 align-middle">
+             <div className="flex items-center gap-2">
+               <div className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full ${isIncoming ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>{isIncoming ? '↓' : '↑'}</div>
+               <div className="flex flex-col">
+                  <div className="font-bold text-gray-800 dark:text-gray-200 leading-tight truncate">{tx.product}</div>
+                  {tx.lot && <div className="text-[10px] text-gray-500 font-medium">Réf: {tx.lot}</div>}
+               </div>
              </div>
-           </div>
-        </td>
-        <td className="py-1 px-2 text-right align-middle">
-          <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{isIncoming ? '+' : '-'}{formatNum(tx.qty)}</span>
-          <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
-        </td>
-        {isIncoming && showValues && <td className="py-1 px-2 text-right text-xs font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)} Dhs` : '-'}</td>}
-        <td className="py-1 px-2 text-center w-8">
-          <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
-        </td>
-      </tr>
-    ));
+          </td>
+          <td className="py-1 px-2 text-right align-middle">
+            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{isIncoming ? '↓' : '↑'}{formatNum(tx.qty)}</span>
+            <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
+          </td>
+          {isIncoming && showValues && <td className="py-1 px-2 text-right text-xs font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)} Dhs` : '-'}</td>}
+          <td className="py-1 px-2 text-center w-8">
+            <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
+          </td>
+        </tr>
+      );
+    });
   };
 
   const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-sm outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 transition-colors";
@@ -274,21 +317,41 @@ function App() {
     <div className="flex flex-col h-full w-full bg-gray-50 dark:bg-gray-900 font-sans transition-colors duration-200">
       <header className="bg-white dark:bg-gray-800 shadow-sm px-6 py-4 flex flex-col xl:flex-row items-center justify-between border-b border-gray-200 dark:border-gray-700 z-10 gap-4 transition-colors">
         <div className="flex items-center gap-4 flex-1 justify-between xl:justify-start w-full xl:w-auto">
-          <div>
-            <h1 className="text-2xl font-black text-blue-900 dark:text-blue-400 tracking-tight">GESTION DE STOCK CLOUD</h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">Connecté à Firebase Firestore</p>
+          <div className="flex items-center gap-3">
+            {/* Header Main Logo */}
+            <div className="p-2 bg-blue-100 dark:bg-blue-900/40 rounded-lg">
+              <svg className="w-8 h-8 text-blue-800 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-2xl font-black tracking-tight mb-0.5 relative group inline-block">
+                <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-700 via-blue-900 to-indigo-800 dark:from-blue-400 dark:via-blue-300 dark:to-indigo-400 border-b-4 border-blue-900 dark:border-blue-400 pb-0.5">
+                  GESTION DE STOCK
+                </span>
+              </h1>
+              <p className="text-sm font-bold italic block">
+                <span className="text-brand-green border-b border-brand-green pb-0.5">Le stock sous contrôle</span>
+              </p>
+            </div>
           </div>
           <button onClick={toggleTheme} className="p-2 rounded-full text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
             {theme === 'dark' ? '☀️' : '🌙'}
           </button>
         </div>
-        <div className="flex flex-none items-center justify-center gap-4 w-full xl:w-auto">
-          <button onClick={() => openModal(TransactionType.IN)} className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-black shadow-md">+ ENTRÉE</button>
-          <button onClick={() => openModal(TransactionType.OUT)} className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-black shadow-md">- SORTIE</button>
+        <div className="flex flex-none items-center justify-center gap-6 w-full xl:w-auto">
+          <button onClick={() => openModal(TransactionType.IN)} className="bg-green-600 hover:bg-green-700 text-white px-10 py-4 rounded-xl font-black shadow-lg shadow-green-500/20 text-lg transition-all active:scale-95 uppercase tracking-wider">+ ENTRÉE</button>
+          <button onClick={() => openModal(TransactionType.OUT)} className="bg-red-600 hover:bg-red-700 text-white px-10 py-4 rounded-xl font-black shadow-lg shadow-red-500/20 text-lg transition-all active:scale-95 uppercase tracking-wider">- SORTIE</button>
         </div>
-        <div className="flex items-center gap-2 flex-1 justify-center xl:justify-end w-full xl:w-auto">
-          <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-3 py-2 rounded-md text-sm font-semibold border border-red-200">PDF</button>
-          <button onClick={handleExportExcel} className="flex items-center gap-2 text-green-700 hover:bg-green-100 px-3 py-2 rounded-md text-sm font-semibold border border-green-200">Excel</button>
+        <div className="flex items-center gap-4 flex-1 justify-center xl:justify-end w-full xl:w-auto">
+          <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-6 py-3 rounded-lg text-base font-bold border-2 border-red-200 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+            PDF
+          </button>
+          <button onClick={handleExportExcel} className="flex items-center gap-2 text-green-700 hover:bg-green-100 px-6 py-3 rounded-lg text-base font-bold border-2 border-green-200 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+            Excel
+          </button>
         </div>
       </header>
 
@@ -331,18 +394,41 @@ function App() {
 
       <main className="flex-1 p-6 flex flex-col lg:flex-row gap-6 overflow-hidden min-h-0">
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-green-200 overflow-hidden relative">
-          <div className="bg-green-700 text-white p-3 font-bold flex justify-between uppercase"><span>ENTRÉES</span><span>{inTxs.length}</span></div>
+          <div className={`bg-green-700 text-white p-3 font-bold flex justify-between items-center uppercase relative`}>
+            <div className="flex items-center gap-2">
+              {/* ENTRÉES Table Logo (Arrow Down) */}
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+              </svg>
+              <span>ENTRÉES</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {headerAlert && (
+                <div className={`w-3 h-3 rounded-full animate-pulse shadow-md ${headerAlert === 'red' ? 'bg-red-500' : 'bg-yellow-400'}`} title={`Alerte péremption: ${headerAlert === 'red' ? '< 30 jours' : 'Proche 30 jours'}`}></div>
+              )}
+              <span>{inTxs.length}</span>
+            </div>
+          </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
-                <tr><th className="p-2">Date</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th>{showValues && <th className="p-2 text-right">Valeur</th>}<th className="p-2"></th></tr>
+                <tr><th className="p-2">Date/Exp</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th>{showValues && <th className="p-2 text-right">Valeur</th>}<th className="p-2"></th></tr>
               </thead>
               <tbody>{renderTxRows(inTxs, true)}</tbody>
             </table>
           </div>
         </div>
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-red-200 overflow-hidden relative">
-          <div className="bg-red-700 text-white p-3 font-bold flex justify-between uppercase"><span>SORTIES</span><span>{outTxs.length}</span></div>
+          <div className="bg-red-700 text-white p-3 font-bold flex justify-between uppercase">
+            <div className="flex items-center gap-2">
+              {/* SORTIES Table Logo (Arrow Up) */}
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+              </svg>
+              <span>SORTIES</span>
+            </div>
+            <span>{outTxs.length}</span>
+          </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
@@ -353,21 +439,30 @@ function App() {
           </div>
         </div>
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-blue-200 overflow-hidden relative">
-          <div className="bg-blue-800 text-white p-3 font-bold flex justify-between uppercase"><span>STOCK DISPONIBLE</span><span>{inventory.length} réf</span></div>
+          <div className="bg-blue-800 text-white p-3 font-bold flex justify-between uppercase">
+            <div className="flex items-center gap-2">
+              {/* STOCK Table Logo */}
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+              </svg>
+              <span>STOCK DISPONIBLE</span>
+            </div>
+            <span>{inventory.length} réf</span>
+          </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
                 <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
               </thead>
               <tbody>
-                {inventory.map((item) => (
-                  <tr key={`${item.product}_${item.lot}`} className="border-b border-gray-100 hover:bg-blue-50/50">
+                {inventory.map((item, idx) => (
+                  <tr key={`${item.product}_${item.lot}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
                     <td className="p-2">
-                      <div className="font-bold">{item.product}</div>
-                      <div className="text-[10px] text-blue-600 font-bold">DUM: {item.lot}</div>
+                      <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
+                      {item.entreprise && <div className="text-[10px] text-gray-500 uppercase font-medium">{item.entreprise}</div>}
                     </td>
-                    <td className="p-2 text-right font-black text-blue-700">{formatNum(item.availableQty)} <span className="text-xs font-normal">{item.unit}</span></td>
-                    {showValues && <td className="p-2 text-right font-bold">{item.totalValueDhs ? formatNum(item.totalValueDhs) : '-'}</td>}
+                    <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-xs font-normal opacity-60">{item.unit}</span></td>
+                    {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs ? formatNum(item.totalValueDhs) : '-'}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -376,7 +471,11 @@ function App() {
         </div>
       </main>
 
-      <footer className="bg-white dark:bg-gray-800 border-t py-2 text-center text-xs font-semibold text-gray-400">© 2026 Abdellah. All rights reserved.</footer>
+      <footer className="bg-white dark:bg-gray-800 border-t py-2 text-center text-xs font-semibold transition-colors">
+        <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 via-green-600 to-indigo-600 dark:from-blue-400 dark:via-green-400 dark:to-indigo-400">
+          © 2026 Abdellah. All rights reserved.
+        </span>
+      </footer>
 
       <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTx ? "MODIFIER" : "AJOUTER"}>
         <EntryForm 

@@ -19,6 +19,7 @@ export interface Transaction {
   unit: UnitType;
   qty: number;
   valueDhs?: number; // Optional value for IN transactions
+  expiryDate?: string; // Optional expiration date (Echéance max)
 }
 
 export interface InventoryItem {
@@ -26,8 +27,9 @@ export interface InventoryItem {
   lot: string;
   unit: UnitType;
   availableQty: number;
+  entreprise?: string;
   client?: string;
-  totalValueDhs?: number; // Added to store calculated remaining value
+  totalValueDhs?: number;
 }
 
 export interface DateRange {
