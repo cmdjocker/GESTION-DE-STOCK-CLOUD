@@ -138,25 +138,46 @@ function App() {
     }
 
     const invMap = new Map<string, InventoryItem & { unitPrice?: number }>();
-    txs.forEach(t => {
+    const isFiltered = appliedFilters.entreprise !== 'ALL' || appliedFilters.client !== 'ALL';
+
+    transactions.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
-        const invKey = `${t.product}_${t.unit}_${t.client || 'AUCUN'}_${t.lot || 'AUCUN'}_${t.entreprise || 'AUCUNE'}`;
-        if (!invMap.has(invKey)) {
-          invMap.set(invKey, { 
-            product: t.product, 
-            lot: t.lot || '', 
-            unit: t.unit, 
-            availableQty: 0, 
-            client: t.client,
-            entreprise: t.entreprise
-          });
-        }
-        const item = invMap.get(invKey)!;
-        if (t.type === TransactionType.IN) {
-          item.availableQty += t.qty;
-          if (t.valueDhs !== undefined && t.qty > 0) item.unitPrice = t.valueDhs / t.qty;
-        } else {
-          item.availableQty -= t.qty;
+        // Apply filter constraints before adding to aggregate stock calculation
+        const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
+        const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
+        
+        if (matchesEnt && matchesCli) {
+           // Key changes based on whether we are viewing a specific selection (aggregate totals)
+           // or all stock (detailed breakdown)
+           let invKey: string;
+           if (isFiltered) {
+             // Total for the specific filter selection
+             invKey = `${t.product}_${t.unit}`;
+           } else {
+             // Detailed totals by entreprise and client
+             invKey = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`;
+           }
+
+          if (!invMap.has(invKey)) {
+            invMap.set(invKey, { 
+              product: t.product, 
+              lot: t.lot || '', 
+              unit: t.unit, 
+              availableQty: 0, 
+              client: isFiltered ? (appliedFilters.client !== 'ALL' ? appliedFilters.client : 'MULTI') : t.client,
+              entreprise: isFiltered ? (appliedFilters.entreprise !== 'ALL' ? appliedFilters.entreprise : 'MULTI') : t.entreprise
+            });
+          }
+          const item = invMap.get(invKey)!;
+          if (t.type === TransactionType.IN) {
+            item.availableQty += t.qty;
+            if (t.valueDhs !== undefined && t.qty > 0) {
+                const currentVal = (item.unitPrice || 0) * (item.availableQty - t.qty);
+                item.unitPrice = (currentVal + t.valueDhs) / item.availableQty;
+            }
+          } else {
+            item.availableQty -= t.qty;
+          }
         }
       }
     });
@@ -179,7 +200,7 @@ function App() {
     const headerAlert = hasRed ? 'red' : (hasYellow ? 'yellow' : null);
 
     const displayInv = Array.from(invMap.values())
-      .filter(item => item.availableQty !== 0)
+      .filter(item => Math.abs(item.availableQty) > 0.001)
       .map(item => {
          if (item.unitPrice !== undefined) item.totalValueDhs = item.unitPrice * item.availableQty;
          return item;
@@ -267,6 +288,8 @@ function App() {
     doc.save(`Rapport_Stock_${dateStr}.pdf`);
   };
 
+  const tableFontSize = showValues ? "text-[11px]" : "text-sm";
+
   const renderTxRows = (txs: Transaction[], isIncoming: boolean) => {
     if (txs.length === 0) return <tr><td colSpan={isIncoming && showValues ? 5 : 4} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>;
     return txs.map((tx) => {
@@ -281,7 +304,7 @@ function App() {
             <div className="flex flex-col">
               <span>{formatDate(tx.date)}</span>
               {isIncoming && tx.expiryDate && (
-                <span className={`text-[9px] font-bold ${expiryStatus === 'red' ? 'text-red-600' : 'text-yellow-600'}`}>
+                <span className={`font-bold ${expiryStatus === 'red' ? 'text-red-600' : 'text-yellow-600'}`} style={{fontSize: showValues ? '8px' : '9px'}}>
                    Exp: {formatDate(tx.expiryDate)}
                 </span>
               )}
@@ -300,7 +323,7 @@ function App() {
             <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty)}</span>
             <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
           </td>
-          {isIncoming && showValues && <td className="py-1 px-2 text-right text-xs font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)} Dhs` : '-'}</td>}
+          {isIncoming && showValues && <td className="py-1 px-2 text-right font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)}` : '-'}</td>}
           <td className="py-1 px-2 text-center w-8">
             <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
           </td>
@@ -318,7 +341,6 @@ function App() {
       <header className="bg-white dark:bg-gray-800 shadow-sm px-6 py-4 flex flex-col xl:flex-row items-center justify-between border-b border-gray-200 dark:border-gray-700 z-10 gap-4 transition-colors">
         <div className="flex items-center gap-4 flex-1 justify-between xl:justify-start w-full xl:w-auto">
           <div className="flex items-center gap-3">
-            {/* Header Main Logo */}
             <div className="p-2 bg-blue-100 dark:bg-blue-900/40 rounded-lg">
               <svg className="w-8 h-8 text-blue-800 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
@@ -396,7 +418,6 @@ function App() {
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-green-200 overflow-hidden relative">
           <div className={`bg-green-700 text-white p-3 font-bold flex justify-between items-center uppercase relative`}>
             <div className="flex items-center gap-2">
-              {/* ENTRÉES Table Logo (Arrow Down) */}
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
               </svg>
@@ -410,7 +431,7 @@ function App() {
             </div>
           </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
-            <table className="w-full text-left text-sm">
+            <table className={`w-full text-left ${tableFontSize}`}>
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
                 <tr><th className="p-2">Date/Exp</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th>{showValues && <th className="p-2 text-right">Valeur</th>}<th className="p-2"></th></tr>
               </thead>
@@ -421,7 +442,6 @@ function App() {
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-red-200 overflow-hidden relative">
           <div className="bg-red-700 text-white p-3 font-bold flex justify-between uppercase">
             <div className="flex items-center gap-2">
-              {/* SORTIES Table Logo (Arrow Up) */}
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18" />
               </svg>
@@ -430,7 +450,7 @@ function App() {
             <span>{outTxs.length}</span>
           </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
-            <table className="w-full text-left text-sm">
+            <table className={`w-full text-left ${tableFontSize}`}>
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
                 <tr><th className="p-2">Date</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th><th className="p-2"></th></tr>
               </thead>
@@ -441,7 +461,6 @@ function App() {
         <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-blue-200 overflow-hidden relative">
           <div className="bg-blue-800 text-white p-3 font-bold flex justify-between uppercase">
             <div className="flex items-center gap-2">
-              {/* STOCK Table Logo */}
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
               </svg>
@@ -450,18 +469,21 @@ function App() {
             <span>{inventory.length} réf</span>
           </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
-            <table className="w-full text-left text-sm">
+            <table className={`w-full text-left ${tableFontSize}`}>
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
                 <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
               </thead>
               <tbody>
                 {inventory.map((item, idx) => (
-                  <tr key={`${item.product}_${item.lot}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
+                  <tr key={`${item.product}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
                     <td className="p-2">
                       <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
-                      {item.entreprise && <div className="text-[10px] text-gray-500 uppercase font-medium">{item.entreprise}</div>}
+                      <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
+                        {item.entreprise && item.entreprise !== 'MULTI' && <span>{item.entreprise}</span>}
+                        {item.client && item.client !== 'MULTI' && <span>• {item.client}</span>}
+                      </div>
                     </td>
-                    <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-xs font-normal opacity-60">{item.unit}</span></td>
+                    <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
                     {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs ? formatNum(item.totalValueDhs) : '-'}</td>}
                   </tr>
                 ))}
