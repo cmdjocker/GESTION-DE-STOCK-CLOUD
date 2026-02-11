@@ -1,0 +1,395 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Transaction, TransactionType, InventoryItem, DateRange } from './types';
+import { 
+  subscribeTransactions, 
+  subscribeProducts, 
+  subscribeEntreprises, 
+  subscribeClients,
+  saveTransaction,
+  deleteTransaction
+} from './services/storageService';
+import Modal from './components/Modal';
+import EntryForm from './components/EntryForm';
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+
+function App() {
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [entreprisesList, setEntreprisesList] = useState<string[]>([]);
+  const [clientsList, setClientsList] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  const [showValues, setShowValues] = useState(false);
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
+
+  useEffect(() => {
+    if (theme === 'dark') document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  
+  // Real-time Subscriptions
+  useEffect(() => {
+    const unsubTx = subscribeTransactions((data) => {
+      setTransactions(data);
+      setLoading(false);
+    });
+    const unsubProd = subscribeProducts(() => {}); // Logic handled in service seeding
+    const unsubEnt = subscribeEntreprises(setEntreprisesList);
+    const unsubCli = subscribeClients(setClientsList);
+
+    return () => {
+      unsubTx();
+      unsubEnt();
+      unsubCli();
+    };
+  }, []);
+
+  const [filterEntreprise, setFilterEntreprise] = useState<string>('ALL');
+  const [filterClient, setFilterClient] = useState<string>('ALL');
+  const [filterLot, setFilterLot] = useState<string>('');
+  
+  const todayStr = new Date().toISOString().split('T')[0];
+  const firstDayOfMonth = new Date();
+  firstDayOfMonth.setDate(1);
+  const [dateRange, setDateRange] = useState<DateRange>({
+    from: firstDayOfMonth.toISOString().split('T')[0],
+    to: todayStr
+  });
+
+  const [appliedFilters, setAppliedFilters] = useState({
+    entreprise: 'ALL',
+    client: 'ALL',
+    lot: '',
+    dateRange: { from: firstDayOfMonth.toISOString().split('T')[0], to: todayStr }
+  });
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalType, setModalType] = useState<TransactionType>(TransactionType.IN);
+  const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+
+  const handleSaveTransaction = async (txData: Omit<Transaction, 'id'>) => {
+    try {
+      await saveTransaction(txData, editingTx?.id);
+      setIsModalOpen(false);
+      setEditingTx(null);
+    } catch (err) {
+      alert("Erreur lors de l'enregistrement : " + err);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (window.confirm('Voulez-vous vraiment supprimer cette entrée ?')) {
+      try {
+        await deleteTransaction(id);
+        setIsModalOpen(false);
+        setEditingTx(null);
+      } catch (err) {
+        alert("Erreur lors de la suppression : " + err);
+      }
+    }
+  };
+
+  const openModal = (type: TransactionType, txToEdit: Transaction | null = null) => {
+    setModalType(type);
+    setEditingTx(txToEdit);
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingTx(null);
+  };
+
+  const handleApplyFilters = () => {
+    setAppliedFilters({ entreprise: filterEntreprise, client: filterClient, lot: filterLot, dateRange: dateRange });
+  };
+
+  const resetFilters = () => {
+    const start = firstDayOfMonth.toISOString().split('T')[0];
+    setFilterEntreprise('ALL');
+    setFilterClient('ALL');
+    setFilterLot('');
+    setDateRange({ from: start, to: todayStr });
+    setAppliedFilters({ entreprise: 'ALL', client: 'ALL', lot: '', dateRange: { from: start, to: todayStr } });
+  };
+
+  const { inTxs, outTxs, inventory } = useMemo(() => {
+    let txs = transactions;
+    if (appliedFilters.entreprise !== 'ALL') txs = txs.filter(t => t.entreprise === appliedFilters.entreprise);
+    if (appliedFilters.client !== 'ALL') txs = txs.filter(t => t.client === appliedFilters.client);
+    if (appliedFilters.lot.trim() !== '') {
+      const searchLot = appliedFilters.lot.trim().toUpperCase();
+      txs = txs.filter(t => (t.lot || '').toUpperCase().includes(searchLot));
+    }
+
+    const invMap = new Map<string, InventoryItem & { unitPrice?: number }>();
+    txs.forEach(t => {
+      if (t.date <= appliedFilters.dateRange.to) {
+        const invKey = `${t.product}_${t.unit}_${t.client || 'AUCUN'}_${t.lot || 'AUCUN'}`;
+        if (!invMap.has(invKey)) {
+          invMap.set(invKey, { product: t.product, lot: t.lot || '', unit: t.unit, availableQty: 0, client: t.client });
+        }
+        const item = invMap.get(invKey)!;
+        if (t.type === TransactionType.IN) {
+          item.availableQty += t.qty;
+          if (t.valueDhs !== undefined && t.qty > 0) item.unitPrice = t.valueDhs / t.qty;
+        } else {
+          item.availableQty -= t.qty;
+        }
+      }
+    });
+
+    const displayTxs = txs
+      .filter(t => t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    const inTxs = displayTxs.filter(t => t.type === TransactionType.IN);
+    const outTxs = displayTxs.filter(t => t.type === TransactionType.OUT);
+    const displayInv = Array.from(invMap.values())
+      .filter(item => item.availableQty !== 0)
+      .map(item => {
+         if (item.unitPrice !== undefined) item.totalValueDhs = item.unitPrice * item.availableQty;
+         return item;
+      })
+      .sort((a, b) => a.product.localeCompare(b.product));
+
+    return { inTxs, outTxs, inventory: displayInv };
+  }, [transactions, appliedFilters]);
+
+  const formatNum = (num: number) => {
+    const parts = num.toFixed(2).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+    return parts.join(',');
+  };
+
+  const formatDate = (dateStr: string) => {
+    const [y, m, d] = dateStr.split('-');
+    return `${d}/${m}/${y}`;
+  };
+
+  const handleExportExcel = () => {
+    let csvContent = "\uFEFF"; 
+    const sep = ";";
+    csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;CLIENT;DUM REF;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
+    inventory.forEach(item => { csvContent += `${item.product}${sep}${item.client || ''}${sep}${item.lot || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Rapport_Stock_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
+  };
+
+  const handleExportPDF = () => {
+    const includeHistory = window.confirm("Inclure l'historique des ENTRÉES et SORTIES ?");
+    const doc = new jsPDF();
+    const dateStr = new Date().toISOString().split('T')[0];
+    const pageWidth = doc.internal.pageSize.getWidth();
+    
+    doc.setFillColor(30, 64, 175);
+    doc.rect(14, 14, pageWidth - 28, 24, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(24);
+    doc.setFont("helvetica", "bold");
+    doc.text("RAPPORT DE STOCK", pageWidth / 2, 31, { align: "center" });
+    doc.setTextColor(100, 100, 100);
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Édité le : ${formatDate(dateStr)}`, pageWidth / 2, 46, { align: "center" });
+    doc.setTextColor(0, 0, 0);
+    
+    let currentY = 55;
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("STOCK DISPONIBLE", 14, currentY);
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['Produit', 'Client', 'DUM Réf', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
+      body: inventory.map(i => [i.product, i.client || '-', i.lot || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
+      theme: 'grid',
+      headStyles: { fillColor: [30, 64, 175] }
+    });
+    
+    if (includeHistory) {
+      currentY = (doc as any).lastAutoTable.finalY + 15;
+      doc.text("ENTRÉES", 14, currentY);
+      autoTable(doc, {
+        startY: currentY + 5,
+        head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Réf', ...(showValues ? ['Valeur (Dhs)'] : [])]],
+        body: inTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-', ...(showValues ? [t.valueDhs !== undefined ? formatNum(t.valueDhs) : '-'] : [])]),
+        theme: 'grid',
+        headStyles: { fillColor: [21, 128, 61] }
+      });
+      currentY = (doc as any).lastAutoTable.finalY + 15;
+      doc.text("SORTIES", 14, currentY);
+      autoTable(doc, {
+        startY: currentY + 5,
+        head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Entrée Réf']],
+        body: outTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-']),
+        theme: 'grid',
+        headStyles: { fillColor: [185, 28, 28] }
+      });
+    }
+    doc.save(`Rapport_Stock_${dateStr}.pdf`);
+  };
+
+  const bgIn = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322c55e' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M12 4v4m0 0-2-2m2 2 2-2'/%3E%3C/svg%3E\")";
+  const bgOut = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M12 8V4m0 0-2 2m2-2 2 2'/%3E%3C/svg%3E\")";
+  const bgStock = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3Cpath d='M7.5 4.21l4.5 2.6 4.5-2.6'/%3E%3Cpath d='M7.5 19.79v-5.2L3 12'/%3E%3Cpath d='M21 12l-4.5 2.6v5.2'/%3E%3C/svg%3E\")";
+
+  const renderTxRows = (txs: Transaction[], isIncoming: boolean) => {
+    if (txs.length === 0) return <tr><td colSpan={isIncoming && showValues ? 5 : 4} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>;
+    return txs.map((tx) => (
+      <tr key={tx.id} className="hover:bg-gray-100 dark:hover:bg-gray-700/50 border-b border-gray-100 dark:border-gray-800/60 group transition-colors">
+        <td className="py-1 px-2 text-gray-600 dark:text-gray-400 align-middle whitespace-nowrap">{formatDate(tx.date)}</td>
+        <td className="py-1 px-2 align-middle">
+           <div className="flex items-center gap-2">
+             <div className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full ${isIncoming ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>{isIncoming ? '↓' : '↑'}</div>
+             <div className="flex flex-col">
+                <div className="font-bold text-gray-800 dark:text-gray-200 leading-tight truncate">{tx.product}</div>
+                {tx.lot && <div className="text-[10px] text-gray-500 font-medium">Réf: {tx.lot}</div>}
+             </div>
+           </div>
+        </td>
+        <td className="py-1 px-2 text-right align-middle">
+          <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{isIncoming ? '+' : '-'}{formatNum(tx.qty)}</span>
+          <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
+        </td>
+        {isIncoming && showValues && <td className="py-1 px-2 text-right text-xs font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)} Dhs` : '-'}</td>}
+        <td className="py-1 px-2 text-center w-8">
+          <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
+        </td>
+      </tr>
+    ));
+  };
+
+  const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-sm outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 transition-colors";
+
+  if (loading) return <div className="h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 text-blue-600 font-bold">CHARGEMENT DE LA BASE DE DONNÉES...</div>;
+
+  return (
+    <div className="flex flex-col h-full w-full bg-gray-50 dark:bg-gray-900 font-sans transition-colors duration-200">
+      <header className="bg-white dark:bg-gray-800 shadow-sm px-6 py-4 flex flex-col xl:flex-row items-center justify-between border-b border-gray-200 dark:border-gray-700 z-10 gap-4 transition-colors">
+        <div className="flex items-center gap-4 flex-1 justify-between xl:justify-start w-full xl:w-auto">
+          <div>
+            <h1 className="text-2xl font-black text-blue-900 dark:text-blue-400 tracking-tight">GESTION DE STOCK CLOUD</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">Connecté à Firebase Firestore</p>
+          </div>
+          <button onClick={toggleTheme} className="p-2 rounded-full text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+        </div>
+        <div className="flex flex-none items-center justify-center gap-4 w-full xl:w-auto">
+          <button onClick={() => openModal(TransactionType.IN)} className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-black shadow-md">+ ENTRÉE</button>
+          <button onClick={() => openModal(TransactionType.OUT)} className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-black shadow-md">- SORTIE</button>
+        </div>
+        <div className="flex items-center gap-2 flex-1 justify-center xl:justify-end w-full xl:w-auto">
+          <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-3 py-2 rounded-md text-sm font-semibold border border-red-200">PDF</button>
+          <button onClick={handleExportExcel} className="flex items-center gap-2 text-green-700 hover:bg-green-100 px-3 py-2 rounded-md text-sm font-semibold border border-green-200">Excel</button>
+        </div>
+      </header>
+
+      <div className="bg-white dark:bg-gray-800 px-6 py-4 shadow-sm border-b border-gray-200 dark:border-gray-700 z-0 flex-none transition-colors">
+        <div className="flex flex-col md:flex-row md:items-end gap-4">
+          <div className="flex-1">
+            <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1 uppercase">Entreprise</label>
+            <select value={filterEntreprise} onChange={(e) => setFilterEntreprise(e.target.value)} className={inputClass}>
+              <option value="ALL">-- Toutes --</option>
+              {entreprisesList.map(ent => <option key={ent} value={ent}>{ent}</option>)}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1 uppercase">Client</label>
+            <select value={filterClient} onChange={(e) => setFilterClient(e.target.value)} className={inputClass}>
+              <option value="ALL">-- Tous --</option>
+              {clientsList.map(cli => <option key={cli} value={cli}>{cli}</option>)}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1 uppercase">DUM Réf</label>
+            <input type="text" placeholder="Rechercher..." value={filterLot} onChange={(e) => setFilterLot(e.target.value)} className={`${inputClass} uppercase`} />
+          </div>
+          <div className="flex-none flex items-center gap-2">
+             <input type="date" value={dateRange.from} onChange={(e) => setDateRange(prev => ({ ...prev, from: e.target.value }))} className={inputClass} />
+             <input type="date" value={dateRange.to} onChange={(e) => setDateRange(prev => ({ ...prev, to: e.target.value }))} className={inputClass} />
+          </div>
+          <div className="flex-none flex flex-col items-center gap-2 justify-end">
+             <div className="flex gap-2 w-full">
+               <button onClick={handleApplyFilters} className="px-4 py-2 text-sm font-bold text-white bg-blue-600 rounded flex-1">Filtrer</button>
+               <button onClick={resetFilters} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded flex-1">Réinit.</button>
+             </div>
+             <label className="flex items-center space-x-2 text-xs font-semibold text-gray-500 cursor-pointer">
+               <input type="checkbox" checked={showValues} onChange={e => setShowValues(e.target.checked)} className="rounded h-3 w-3" />
+               <span>Afficher Valeurs (Dhs)</span>
+             </label>
+          </div>
+        </div>
+      </div>
+
+      <main className="flex-1 p-6 flex flex-col lg:flex-row gap-6 overflow-hidden min-h-0">
+        <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-green-200 overflow-hidden relative">
+          <div className="bg-green-700 text-white p-3 font-bold flex justify-between uppercase"><span>ENTRÉES</span><span>{inTxs.length}</span></div>
+          <div className="flex-1 overflow-auto custom-scrollbar">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
+                <tr><th className="p-2">Date</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th>{showValues && <th className="p-2 text-right">Valeur</th>}<th className="p-2"></th></tr>
+              </thead>
+              <tbody>{renderTxRows(inTxs, true)}</tbody>
+            </table>
+          </div>
+        </div>
+        <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-red-200 overflow-hidden relative">
+          <div className="bg-red-700 text-white p-3 font-bold flex justify-between uppercase"><span>SORTIES</span><span>{outTxs.length}</span></div>
+          <div className="flex-1 overflow-auto custom-scrollbar">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
+                <tr><th className="p-2">Date</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th><th className="p-2"></th></tr>
+              </thead>
+              <tbody>{renderTxRows(outTxs, false)}</tbody>
+            </table>
+          </div>
+        </div>
+        <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-md border border-blue-200 overflow-hidden relative">
+          <div className="bg-blue-800 text-white p-3 font-bold flex justify-between uppercase"><span>STOCK DISPONIBLE</span><span>{inventory.length} réf</span></div>
+          <div className="flex-1 overflow-auto custom-scrollbar">
+            <table className="w-full text-left text-sm">
+              <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500">
+                <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
+              </thead>
+              <tbody>
+                {inventory.map((item) => (
+                  <tr key={`${item.product}_${item.lot}`} className="border-b border-gray-100 hover:bg-blue-50/50">
+                    <td className="p-2">
+                      <div className="font-bold">{item.product}</div>
+                      <div className="text-[10px] text-blue-600 font-bold">DUM: {item.lot}</div>
+                    </td>
+                    <td className="p-2 text-right font-black text-blue-700">{formatNum(item.availableQty)} <span className="text-xs font-normal">{item.unit}</span></td>
+                    {showValues && <td className="p-2 text-right font-bold">{item.totalValueDhs ? formatNum(item.totalValueDhs) : '-'}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </main>
+
+      <footer className="bg-white dark:bg-gray-800 border-t py-2 text-center text-xs font-semibold text-gray-400">© 2026 Abdellah. All rights reserved.</footer>
+
+      <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTx ? "MODIFIER" : "AJOUTER"}>
+        <EntryForm 
+          key={editingTx?.id || 'new'}
+          type={modalType}
+          initialData={editingTx || undefined}
+          onSubmit={handleSaveTransaction}
+          onCancel={closeModal}
+          onDelete={editingTx ? () => handleDelete(editingTx.id) : undefined}
+        />
+      </Modal>
+    </div>
+  );
+}
+
+export default App;
