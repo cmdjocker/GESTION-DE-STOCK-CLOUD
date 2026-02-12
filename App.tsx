@@ -140,7 +140,6 @@ function App() {
     const isCliSelected = appliedFilters.client !== 'ALL';
     const isLotFiltered = appliedFilters.lot.trim() !== '';
 
-    // 1. Filter Movements for the 3 tables
     const filterFn = (t: Transaction) => {
       const matchesDate = t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to;
       const matchesEnt = !isEntSelected || t.entreprise === appliedFilters.entreprise;
@@ -153,7 +152,6 @@ function App() {
     const inTxs = displayMovements.filter(t => t.type === TransactionType.IN);
     const outTxs = displayMovements.filter(t => t.type === TransactionType.OUT);
 
-    // 2. Inventory Calculation
     const invDataMap = new Map<string, {
       product: string;
       unit: string;
@@ -172,13 +170,6 @@ function App() {
         const matchesLot = !isLotFiltered || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
         
         if (matchesEnt && matchesCli && matchesLot) {
-          /**
-           * GRANULAR GROUPING LOGIC:
-           * - Both Selected: Totals per product
-           * - Ent Only Selected: Totals per product per client
-           * - Cli Only Selected: Totals per product per entreprise
-           * - None Selected: Detailed batch view (per DUM Réf)
-           */
           let key;
           if (isEntSelected && isCliSelected) {
             key = `${t.product}_${t.unit}`;
@@ -194,7 +185,6 @@ function App() {
             invDataMap.set(key, {
               product: t.product,
               unit: t.unit,
-              // If aggregated, show 'FILTRÉ' or specific grouping value
               lot: (isEntSelected || isCliSelected) ? 'FILTRÉ' : (t.lot || '-'),
               entreprise: isEntSelected ? appliedFilters.entreprise : (isCliSelected ? (t.entreprise || '-') : (t.entreprise || '-')),
               client: isCliSelected ? appliedFilters.client : (isEntSelected ? (t.client || '-') : (t.client || '-')),
@@ -241,8 +231,8 @@ function App() {
     return { inTxs, outTxs, inventory: displayInv, headerAlert };
   }, [transactions, appliedFilters, filtersApplied]);
 
-  const formatNum = (num: number) => {
-    const parts = num.toFixed(2).split('.');
+  const formatNum = (num: number, decimals: number = 2) => {
+    const parts = num.toFixed(decimals).split('.');
     parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, " ");
     return parts.join(',');
   };
@@ -258,7 +248,7 @@ function App() {
     const sep = ";";
     csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;ENTREPRISE;CLIENT;DUM Entrée Réf;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
     inventory.forEach(item => { 
-      csvContent += `${item.product}${sep}${item.entreprise || ''}${sep}${item.client || ''}${sep}${item.lot || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; 
+      csvContent += `${item.product}${sep}${item.entreprise || ''}${sep}${item.client || ''}${sep}${item.lot || ''}${sep}${formatNum(item.availableQty, 2)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs, 3) : ''}\n`; 
     });
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -287,21 +277,88 @@ function App() {
     doc.setTextColor(0, 0, 0);
     
     let currentY = 55;
-    const pdfFontSize = showValues ? 8 : 9;
+    const pdfFontSize = showValues ? 7.5 : 9;
 
-    const totalInventoryValue = inventory.reduce((sum, item) => sum + (item.totalValueDhs || 0), 0);
+    const isEntSelected = appliedFilters.entreprise !== 'ALL';
+    const isCliSelected = appliedFilters.client !== 'ALL';
+
+    const headers = ['Produit', 'Client', 'Entreprise', 'DUM Entrée Réf', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])];
+    let body: any[] = [];
+    let grandTotalValue = 0;
+
+    // SCENARIO: Aggregated view with Section Headers & Value Sub-totals
+    if ((isEntSelected && !isCliSelected) || (!isEntSelected && isCliSelected)) {
+      const groupKey = isEntSelected ? 'client' : 'entreprise';
+      const groupedData: Record<string, InventoryItem[]> = {};
+      
+      inventory.forEach(item => {
+        const k = (isEntSelected ? item.client : item.entreprise) || 'AUCUN';
+        if (!groupedData[k]) groupedData[k] = [];
+        groupedData[k].push(item);
+      });
+
+      Object.entries(groupedData).forEach(([groupName, items]) => {
+        // Section Header Row
+        body.push([{ 
+          content: `${groupKey.toUpperCase()}: ${groupName}`, 
+          colSpan: headers.length, 
+          styles: { fillColor: [240, 247, 255], fontStyle: 'bold', textColor: [30, 64, 175], fontSize: pdfFontSize + 1 } 
+        }]);
+
+        let subtotalVal = 0;
+        items.forEach(i => {
+          subtotalVal += (i.totalValueDhs || 0);
+          grandTotalValue += (i.totalValueDhs || 0);
+          body.push([
+            i.product, 
+            i.client || '-', 
+            i.entreprise || '-', 
+            i.lot || '-', 
+            formatNum(i.availableQty, 2), 
+            i.unit, 
+            ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs, 3) : '-'] : [])
+          ]);
+        });
+
+        // Sub-total Row (Valeur ONLY, No Quantité)
+        if (showValues) {
+          body.push([
+            { content: `SOUS-TOTAL ${groupName}`, colSpan: 6, styles: { fontStyle: 'bold', halign: 'right', fontSize: pdfFontSize + 1.2, fillColor: [248, 248, 248] } },
+            { content: formatNum(subtotalVal, 3), styles: { fontStyle: 'bold', halign: 'right', fontSize: pdfFontSize + 1.2, fillColor: [248, 248, 248] } }
+          ]);
+        }
+      });
+    } else {
+      // Flat view
+      inventory.forEach(i => {
+        grandTotalValue += (i.totalValueDhs || 0);
+        body.push([
+          i.product, 
+          i.client || '-', 
+          i.entreprise || '-', 
+          i.lot || '-', 
+          formatNum(i.availableQty, 2), 
+          i.unit, 
+          ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs, 3) : '-'] : [])
+        ]);
+      });
+    }
 
     doc.setFontSize(14);
     doc.setFont("helvetica", "bold");
     doc.text("STOCK DISPONIBLE", 14, currentY);
+    
     autoTable(doc, {
       startY: currentY + 5,
-      head: [['Produit', 'Client', 'Entreprise', 'DUM Entrée Réf', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
-      body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', i.lot || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
-      foot: showValues ? [['TOTAL', '', '', '', '', '', formatNum(totalInventoryValue)]] : undefined,
+      head: [headers],
+      body: body,
+      foot: showValues ? [[
+        { content: 'TOTAL GÉNÉRAL', colSpan: 6, styles: { halign: 'right', fontSize: pdfFontSize + 1.5 } },
+        { content: formatNum(grandTotalValue, 3), styles: { halign: 'right', fontSize: pdfFontSize + 1.5 } }
+      ]] : undefined,
       theme: 'grid',
       headStyles: { fillColor: [30, 64, 175] },
-      footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
+      footStyles: { fillColor: [230, 230, 230], textColor: [0, 0, 0], fontStyle: 'bold' },
       styles: { fontSize: pdfFontSize }
     });
     
@@ -314,8 +371,8 @@ function App() {
       autoTable(doc, {
         startY: currentY + 5,
         head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Réf', ...(showValues ? ['Valeur (Dhs)'] : [])]],
-        body: inTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-', ...(showValues ? [t.valueDhs !== undefined ? formatNum(t.valueDhs) : '-'] : [])]),
-        foot: showValues ? [['TOTAL', '', '', '', '', '', '', formatNum(totalInValue)]] : undefined,
+        body: inTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty, 2), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-', ...(showValues ? [t.valueDhs !== undefined ? formatNum(t.valueDhs, 3) : '-'] : [])]),
+        foot: showValues ? [['TOTAL', '', '', '', '', '', '', formatNum(totalInValue, 3)]] : undefined,
         theme: 'grid',
         headStyles: { fillColor: [21, 128, 61] },
         footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
@@ -329,7 +386,7 @@ function App() {
       autoTable(doc, {
         startY: currentY + 5,
         head: [['Date', 'Produit', 'Qté', 'Unité', 'Entreprise', 'Client', 'DUM Entrée Réf']],
-        body: outTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-']),
+        body: outTxs.map(t => [formatDate(t.date), t.product, formatNum(t.qty, 2), t.unit, t.entreprise || '-', t.client || '-', t.lot || '-']),
         theme: 'grid',
         headStyles: { fillColor: [185, 28, 28] },
         styles: { fontSize: pdfFontSize }
@@ -370,16 +427,112 @@ function App() {
              </div>
           </td>
           <td className="py-1 px-2 text-right align-middle">
-            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty)}</span>
+            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty, 2)}</span>
             <span className="text-[10px] text-gray-500 ml-1">{tx.unit}</span>
           </td>
-          {isIncoming && showValues && <td className="py-1 px-2 text-right font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs)}` : '-'}</td>}
+          {isIncoming && showValues && <td className="py-1 px-2 text-right font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs, 3)}` : '-'}</td>}
           <td className="py-1 px-2 text-center w-8">
             <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
           </td>
         </tr>
       );
     });
+  };
+
+  const renderStockItems = () => {
+    if (inventory.length === 0) {
+      return <tr><td colSpan={showValues ? 3 : 2} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>;
+    }
+
+    const isEntSelected = appliedFilters.entreprise !== 'ALL';
+    const isCliSelected = appliedFilters.client !== 'ALL';
+
+    if ((isEntSelected && !isCliSelected) || (!isEntSelected && isCliSelected)) {
+      const groupKey = isEntSelected ? 'client' : 'entreprise';
+      const groupedData: Record<string, InventoryItem[]> = {};
+      
+      inventory.forEach(item => {
+        const k = (isEntSelected ? item.client : item.entreprise) || 'AUCUN';
+        if (!groupedData[k]) groupedData[k] = [];
+        groupedData[k].push(item);
+      });
+
+      let grandTotalValue = 0;
+      const rows: React.ReactNode[] = [];
+
+      Object.entries(groupedData).forEach(([groupName, items]) => {
+        rows.push(
+          <tr key={`header-${groupName}`} className="bg-blue-50/50 dark:bg-blue-900/20">
+            <td colSpan={showValues ? 3 : 2} className="p-2 font-black text-blue-900 dark:text-blue-300 uppercase border-b border-blue-200 dark:border-blue-800">
+              {groupKey.toUpperCase()}: {groupName}
+            </td>
+          </tr>
+        );
+
+        let subtotalVal = 0;
+        items.forEach((item, idx) => {
+          subtotalVal += (item.totalValueDhs || 0);
+          grandTotalValue += (item.totalValueDhs || 0);
+          rows.push(
+            <tr key={`${groupName}-${item.product}-${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+              <td className="p-2 pl-6">
+                <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
+                <div className="text-[10px] text-gray-500 uppercase font-medium">Réf: {item.lot}</div>
+              </td>
+              <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">
+                {formatNum(item.availableQty, 2)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span>
+              </td>
+              {showValues && (
+                <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">
+                  {item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs, 3) : '-'}
+                </td>
+              )}
+            </tr>
+          );
+        });
+
+        if (showValues) {
+          rows.push(
+            <tr key={`subtotal-${groupName}`} className="bg-gray-100/50 dark:bg-gray-800/50 border-b border-gray-200 dark:border-gray-700">
+              <td className="p-2 pl-6 font-black text-base text-gray-700 dark:text-gray-300">SOUS-TOTAL {groupName}</td>
+              <td className="p-2"></td>
+              <td className="p-2 text-right font-black text-base text-blue-900 dark:text-blue-400 border-t border-gray-300 dark:border-gray-600">
+                {formatNum(subtotalVal, 3)}
+              </td>
+            </tr>
+          );
+        }
+      });
+
+      if (showValues) {
+        rows.push(
+          <tr key="grand-total" className="bg-blue-100 dark:bg-blue-900/40">
+            <td className="p-3 font-black text-lg text-blue-900 dark:text-blue-200">TOTAL GÉNÉRAL</td>
+            <td className="p-3"></td>
+            <td className="p-3 text-right font-black text-lg text-blue-900 dark:text-blue-200 border-t-2 border-double border-blue-900 dark:border-blue-400">
+              {formatNum(grandTotalValue, 3)}
+            </td>
+          </tr>
+        );
+      }
+      return rows;
+    }
+
+    // Default Flat List
+    return inventory.map((item, idx) => (
+      <tr key={`${item.product}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
+        <td className="p-2">
+          <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
+          <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
+            {item.entreprise && <span>{item.entreprise}</span>}
+            {item.client && <span>• {item.client}</span>}
+            {item.lot && item.lot !== '-' && <span className="text-blue-600 dark:text-blue-400">• Réf: {item.lot}</span>}
+          </div>
+        </td>
+        <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty, 2)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
+        {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs, 3) : '-'}</td>}
+      </tr>
+    ));
   };
 
   const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-sm outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 transition-colors";
@@ -519,24 +672,7 @@ function App() {
                 <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
               </thead>
               <tbody>
-                {inventory.length === 0 ? (
-                  <tr><td colSpan={showValues ? 3 : 2} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>
-                ) : (
-                  inventory.map((item, idx) => (
-                    <tr key={`${item.product}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
-                      <td className="p-2">
-                        <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
-                        <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
-                          {item.entreprise && <span>{item.entreprise}</span>}
-                          {item.client && <span>• {item.client}</span>}
-                          {item.lot && item.lot !== '-' && <span className="text-blue-600 dark:text-blue-400">• Réf: {item.lot}</span>}
-                        </div>
-                      </td>
-                      <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
-                      {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : '-'}</td>}
-                    </tr>
-                  ))
-                )}
+                {renderStockItems()}
               </tbody>
             </table>
           </div>
