@@ -136,12 +136,16 @@ function App() {
       return { inTxs: [], outTxs: [], inventory: [], headerAlert: null };
     }
 
-    // 1. Filter Movements for the 3 tables (Direct movements for the selected range)
+    const isEntSelected = appliedFilters.entreprise !== 'ALL';
+    const isCliSelected = appliedFilters.client !== 'ALL';
+    const isLotFiltered = appliedFilters.lot.trim() !== '';
+
+    // 1. Filter Movements for the 3 tables
     const filterFn = (t: Transaction) => {
       const matchesDate = t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to;
-      const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
-      const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
-      const matchesLot = appliedFilters.lot.trim() === '' || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
+      const matchesEnt = !isEntSelected || t.entreprise === appliedFilters.entreprise;
+      const matchesCli = !isCliSelected || t.client === appliedFilters.client;
+      const matchesLot = !isLotFiltered || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
       return matchesDate && matchesEnt && matchesCli && matchesLot;
     };
 
@@ -149,8 +153,7 @@ function App() {
     const inTxs = displayMovements.filter(t => t.type === TransactionType.IN);
     const outTxs = displayMovements.filter(t => t.type === TransactionType.OUT);
 
-    // 2. Inventory Calculation (Cumulative up to the "To" date)
-    // Always group by Product, Unit, Enterprise, Client, and Lot (DUM Réf) to show actual references
+    // 2. Inventory Calculation
     const invDataMap = new Map<string, {
       product: string;
       unit: string;
@@ -164,21 +167,37 @@ function App() {
 
     transactions.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
-        const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
-        const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
-        const matchesLot = appliedFilters.lot.trim() === '' || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
+        const matchesEnt = !isEntSelected || t.entreprise === appliedFilters.entreprise;
+        const matchesCli = !isCliSelected || t.client === appliedFilters.client;
+        const matchesLot = !isLotFiltered || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
         
         if (matchesEnt && matchesCli && matchesLot) {
-          // Key includes the Lot (DUM Réf) so we never show "MULTI"
-          const key = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}_${t.lot || 'NA'}`;
+          /**
+           * GRANULAR GROUPING LOGIC:
+           * - Both Selected: Totals per product
+           * - Ent Only Selected: Totals per product per client
+           * - Cli Only Selected: Totals per product per entreprise
+           * - None Selected: Detailed batch view (per DUM Réf)
+           */
+          let key;
+          if (isEntSelected && isCliSelected) {
+            key = `${t.product}_${t.unit}`;
+          } else if (isEntSelected) {
+            key = `${t.product}_${t.unit}_${t.client || 'NA'}`;
+          } else if (isCliSelected) {
+            key = `${t.product}_${t.unit}_${t.entreprise || 'NA'}`;
+          } else {
+            key = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}_${t.lot || 'NA'}`;
+          }
 
           if (!invDataMap.has(key)) {
             invDataMap.set(key, {
               product: t.product,
               unit: t.unit,
-              lot: t.lot || '-',
-              entreprise: t.entreprise || '-',
-              client: t.client || '-',
+              // If aggregated, show 'FILTRÉ' or specific grouping value
+              lot: (isEntSelected || isCliSelected) ? 'FILTRÉ' : (t.lot || '-'),
+              entreprise: isEntSelected ? appliedFilters.entreprise : (isCliSelected ? (t.entreprise || '-') : (t.entreprise || '-')),
+              client: isCliSelected ? appliedFilters.client : (isEntSelected ? (t.client || '-') : (t.client || '-')),
               sumInQty: 0,
               sumOutQty: 0,
               sumInValue: 0
@@ -199,7 +218,6 @@ function App() {
     const displayInv: InventoryItem[] = Array.from(invDataMap.values())
       .map(entry => {
         const availableQty = entry.sumInQty - entry.sumOutQty;
-        // Formula: (Total Value IN / Total Qty IN) * Available Qty
         const unitPrice = entry.sumInQty > 0 ? entry.sumInValue / entry.sumInQty : 0;
         const totalValueDhs = unitPrice * availableQty;
 
