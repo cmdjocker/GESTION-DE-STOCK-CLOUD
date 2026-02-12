@@ -29,6 +29,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
   const [unit, setUnit] = useState<UnitType>(initialData?.unit || UnitType.KG);
   const [qty, setQty] = useState<number | ''>(initialData?.qty || '');
   const [valueDhs, setValueDhs] = useState<number | ''>(initialData?.valueDhs || '');
+  const [securityCode, setSecurityCode] = useState('');
 
   const [isNewProduct, setIsNewProduct] = useState(false);
   const [newProductName, setNewProductName] = useState('');
@@ -47,6 +48,12 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Security check
+    if (securityCode !== '2026') {
+      alert('Code de sécurité incorrect. Accès refusé.');
+      return;
+    }
+
     const finalProduct = isNewProduct ? newProductName.trim().toUpperCase() : product;
     const finalEntreprise = isNewEntreprise ? newEntrepriseName.trim().toUpperCase() : entreprise;
     const finalClient = isNewClient ? newClientName.trim().toUpperCase() : client;
@@ -68,7 +75,6 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
     if (isNewEntreprise) await addToList("entreprises", finalEntreprise);
     if (isNewClient) await addToList("clients", finalClient);
 
-    // Build the payload dynamically to avoid 'undefined' values which Firestore rejects
     const payload: any = {
       type,
       date,
@@ -188,6 +194,21 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
           <input type="number" step="0.01" value={valueDhs} onChange={(e) => setValueDhs(e.target.value === '' ? '' : Number(e.target.value))} className={inputClass} placeholder="0,00 Dhs" />
         </div>
       )}
+
+      <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800">
+        <label className="block text-sm font-bold mb-1 text-blue-800 dark:text-blue-300 flex items-center gap-2">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+          Code de Sécurité
+        </label>
+        <input 
+          type="password" 
+          required 
+          value={securityCode} 
+          onChange={(e) => setSecurityCode(e.target.value)} 
+          className={inputClass} 
+          placeholder="Entrer le code pour valider" 
+        />
+      </div>
 
       <div className="pt-6 flex justify-between items-center border-t border-gray-100 dark:border-gray-700">
         {onDelete && (
