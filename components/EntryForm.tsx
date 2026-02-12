@@ -68,18 +68,33 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
     if (isNewEntreprise) await addToList("entreprises", finalEntreprise);
     if (isNewClient) await addToList("clients", finalClient);
 
-    onSubmit({
+    // Build the payload dynamically to avoid 'undefined' values which Firestore rejects
+    const payload: any = {
       type,
       date,
-      expiryDate: type === TransactionType.IN ? expiryDate : undefined,
-      entreprise: finalEntreprise || undefined,
-      client: finalClient || undefined,
       lot: lot.trim().toUpperCase(),
       product: finalProduct,
       unit,
       qty: Number(qty),
-      valueDhs: type === TransactionType.IN && valueDhs !== '' ? Number(valueDhs) : undefined,
-    });
+    };
+
+    if (type === TransactionType.IN && expiryDate) {
+      payload.expiryDate = expiryDate;
+    }
+    
+    if (finalEntreprise) {
+      payload.entreprise = finalEntreprise;
+    }
+    
+    if (finalClient) {
+      payload.client = finalClient;
+    }
+    
+    if (type === TransactionType.IN && valueDhs !== '') {
+      payload.valueDhs = Number(valueDhs);
+    }
+
+    onSubmit(payload as Omit<Transaction, 'id'>);
   };
 
   const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded-md p-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-blue-500 transition-all";
