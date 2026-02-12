@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Transaction, TransactionType, InventoryItem, DateRange } from './types';
 import { 
   subscribeTransactions, 
@@ -129,78 +129,96 @@ function App() {
   };
 
   const { inTxs, outTxs, inventory, headerAlert } = useMemo(() => {
-    let txs = transactions;
-    if (appliedFilters.entreprise !== 'ALL') txs = txs.filter(t => t.entreprise === appliedFilters.entreprise);
-    if (appliedFilters.client !== 'ALL') txs = txs.filter(t => t.client === appliedFilters.client);
-    if (appliedFilters.lot.trim() !== '') {
-      const searchLot = appliedFilters.lot.trim().toUpperCase();
-      txs = txs.filter(t => (t.lot || '').toUpperCase().includes(searchLot));
-    }
+    const isAnyFilterActive = appliedFilters.entreprise !== 'ALL' || appliedFilters.client !== 'ALL' || appliedFilters.lot.trim() !== '';
 
-    const invMap = new Map<string, InventoryItem & { unitPrice?: number }>();
-    const isFiltered = appliedFilters.entreprise !== 'ALL' || appliedFilters.client !== 'ALL';
+    // 1. Filter Movements for the 3 tables
+    const filterFn = (t: Transaction) => {
+      const matchesDate = t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to;
+      const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
+      const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
+      const matchesLot = appliedFilters.lot.trim() === '' || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
+      return matchesDate && matchesEnt && matchesCli && matchesLot;
+    };
+
+    const displayMovements = transactions.filter(filterFn).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const inTxs = displayMovements.filter(t => t.type === TransactionType.IN);
+    const outTxs = displayMovements.filter(t => t.type === TransactionType.OUT);
+
+    // 2. Inventory Calculation with value logic: (Total Value / Total Qty) * Available Qty
+    // We calculate cumulative stock up to the 'To' date
+    const invDataMap = new Map<string, {
+      product: string;
+      unit: string;
+      lot: string;
+      entreprise: string;
+      client: string;
+      sumInQty: number;
+      sumOutQty: number;
+      sumInValue: number;
+    }>();
 
     transactions.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
         const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
         const matchesCli = appliedFilters.client === 'ALL' || t.client === appliedFilters.client;
+        const matchesLot = appliedFilters.lot.trim() === '' || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
         
-        if (matchesEnt && matchesCli) {
-           let invKey: string;
-           if (isFiltered) {
-             invKey = `${t.product}_${t.unit}`;
-           } else {
-             invKey = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`;
-           }
+        if (matchesEnt && matchesCli && matchesLot) {
+          // If filtered: Aggregate by Product and Unit
+          // If NOT filtered: Detailed breakdown
+          const key = isAnyFilterActive 
+            ? `${t.product}_${t.unit}` 
+            : `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}_${t.lot || 'NA'}`;
 
-          if (!invMap.has(invKey)) {
-            invMap.set(invKey, { 
-              product: t.product, 
-              lot: t.lot || '', 
-              unit: t.unit, 
-              availableQty: 0, 
-              client: isFiltered ? (appliedFilters.client !== 'ALL' ? appliedFilters.client : 'MULTI') : t.client,
-              entreprise: isFiltered ? (appliedFilters.entreprise !== 'ALL' ? appliedFilters.entreprise : 'MULTI') : t.entreprise
+          if (!invDataMap.has(key)) {
+            invDataMap.set(key, {
+              product: t.product,
+              unit: t.unit,
+              lot: isAnyFilterActive ? (appliedFilters.lot || 'MULTI') : (t.lot || '-'),
+              entreprise: isAnyFilterActive ? (appliedFilters.entreprise !== 'ALL' ? appliedFilters.entreprise : 'MULTI') : (t.entreprise || '-'),
+              client: isAnyFilterActive ? (appliedFilters.client !== 'ALL' ? appliedFilters.client : 'MULTI') : (t.client || '-'),
+              sumInQty: 0,
+              sumOutQty: 0,
+              sumInValue: 0
             });
           }
-          const item = invMap.get(invKey)!;
+          
+          const entry = invDataMap.get(key)!;
           if (t.type === TransactionType.IN) {
-            item.availableQty += t.qty;
-            if (t.valueDhs !== undefined && t.qty > 0) {
-                const currentVal = (item.unitPrice || 0) * (item.availableQty - t.qty);
-                item.unitPrice = (currentVal + t.valueDhs) / item.availableQty;
-            }
+            entry.sumInQty += t.qty;
+            entry.sumInValue += (t.valueDhs || 0);
           } else {
-            item.availableQty -= t.qty;
+            entry.sumOutQty += t.qty;
           }
         }
       }
     });
 
-    const displayTxs = txs
-      .filter(t => t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const displayInv: InventoryItem[] = Array.from(invDataMap.values())
+      .map(entry => {
+        const availableQty = entry.sumInQty - entry.sumOutQty;
+        // Formula: (Valeur totale IN / Quantité ENTREE) * Quantité DISPONIBLE
+        // Simplified: Unit Price * Available Qty
+        const unitPrice = entry.sumInQty > 0 ? entry.sumInValue / entry.sumInQty : 0;
+        const totalValueDhs = unitPrice * availableQty;
 
-    const inTxs = displayTxs.filter(t => t.type === TransactionType.IN);
-    const outTxs = displayTxs.filter(t => t.type === TransactionType.OUT);
-    
-    const allIn = transactions.filter(t => t.type === TransactionType.IN);
-    let hasRed = false;
-    let hasYellow = false;
-    allIn.forEach(t => {
-      const status = getExpiryStatus(t.expiryDate);
-      if (status === 'red') hasRed = true;
-      if (status === 'yellow') hasYellow = true;
-    });
-    const headerAlert = hasRed ? 'red' : (hasYellow ? 'yellow' : null);
-
-    const displayInv = Array.from(invMap.values())
-      .filter(item => Math.abs(item.availableQty) > 0.001)
-      .map(item => {
-         if (item.unitPrice !== undefined) item.totalValueDhs = item.unitPrice * item.availableQty;
-         return item;
+        return {
+          product: entry.product,
+          lot: entry.lot,
+          unit: entry.unit as any,
+          availableQty,
+          entreprise: entry.entreprise,
+          client: entry.client,
+          totalValueDhs
+        };
       })
+      .filter(i => Math.abs(i.availableQty) > 0.001)
       .sort((a, b) => a.product.localeCompare(b.product));
+
+    // Alerts
+    const hasRed = transactions.some(t => t.type === TransactionType.IN && getExpiryStatus(t.expiryDate) === 'red');
+    const hasYellow = transactions.some(t => t.type === TransactionType.IN && getExpiryStatus(t.expiryDate) === 'yellow');
+    const headerAlert = hasRed ? 'red' : (hasYellow ? 'yellow' : null);
 
     return { inTxs, outTxs, inventory: displayInv, headerAlert };
   }, [transactions, appliedFilters]);
@@ -215,19 +233,6 @@ function App() {
     if (!dateStr) return '-';
     const [y, m, d] = dateStr.split('-');
     return `${d}/${m}/${y}`;
-  };
-
-  const handleExportExcel = () => {
-    let csvContent = "\uFEFF"; 
-    const sep = ";";
-    csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;ENTREPRISE;CLIENT;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
-    inventory.forEach(item => { csvContent += `${item.product}${sep}${item.entreprise || ''}${sep}${item.client || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; });
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `Rapport_Stock_${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
   };
 
   const handleExportPDF = () => {
@@ -258,9 +263,9 @@ function App() {
     doc.text("STOCK DISPONIBLE", 14, currentY);
     autoTable(doc, {
       startY: currentY + 5,
-      head: [['Produit', 'Client', 'Entreprise', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
-      body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
-      foot: showValues ? [['TOTAL', '', '', '', '', formatNum(totalInventoryValue)]] : undefined,
+      head: [['Produit', 'Client', 'Entreprise', 'Lot', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
+      body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', i.lot || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
+      foot: showValues ? [['TOTAL', '', '', '', '', '', formatNum(totalInventoryValue)]] : undefined,
       theme: 'grid',
       headStyles: { fillColor: [30, 64, 175] },
       footStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
@@ -269,7 +274,6 @@ function App() {
     
     if (includeHistory) {
       const totalInValue = inTxs.reduce((sum, tx) => sum + (tx.valueDhs || 0), 0);
-
       currentY = (doc as any).lastAutoTable.finalY + 15;
       doc.setFontSize(14);
       doc.setFont("helvetica", "bold");
@@ -383,10 +387,6 @@ function App() {
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
             PDF
           </button>
-          <button onClick={handleExportExcel} className="flex items-center gap-2 text-green-700 hover:bg-green-100 px-6 py-3 rounded-lg text-base font-bold border-2 border-green-200 transition-colors">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-            Excel
-          </button>
         </div>
       </header>
 
@@ -436,12 +436,7 @@ function App() {
               </svg>
               <span>ENTRÉES</span>
             </div>
-            <div className="flex items-center gap-2">
-              {headerAlert && (
-                <div className={`w-3 h-3 rounded-full animate-pulse shadow-md ${headerAlert === 'red' ? 'bg-red-500' : 'bg-yellow-400'}`} title={`Alerte péremption: ${headerAlert === 'red' ? '< 30 jours' : 'Proche 30 jours'}`}></div>
-              )}
-              <span>{inTxs.length}</span>
-            </div>
+            <span>{inTxs.length}</span>
           </div>
           <div className="flex-1 overflow-auto custom-scrollbar">
             <table className={`w-full text-left ${tableFontSize}`}>
@@ -494,10 +489,11 @@ function App() {
                       <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
                         {item.entreprise && item.entreprise !== 'MULTI' && <span>{item.entreprise}</span>}
                         {item.client && item.client !== 'MULTI' && <span>• {item.client}</span>}
+                        {item.lot && item.lot !== 'MULTI' && item.lot !== '-' && <span className="text-blue-600 dark:text-blue-400">• Réf: {item.lot}</span>}
                       </div>
                     </td>
                     <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
-                    {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs ? formatNum(item.totalValueDhs) : '-'}</td>}
+                    {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : '-'}</td>}
                   </tr>
                 ))}
               </tbody>
