@@ -21,6 +21,7 @@ function App() {
   
   const [showValues, setShowValues] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
+  const [filtersApplied, setFiltersApplied] = useState(false);
 
   useEffect(() => {
     if (theme === 'dark') document.documentElement.classList.add('dark');
@@ -104,6 +105,7 @@ function App() {
 
   const handleApplyFilters = () => {
     setAppliedFilters({ entreprise: filterEntreprise, client: filterClient, lot: filterLot, dateRange: dateRange });
+    setFiltersApplied(true);
   };
 
   const resetFilters = () => {
@@ -113,6 +115,7 @@ function App() {
     setFilterLot('');
     setDateRange({ from: start, to: todayStr });
     setAppliedFilters({ entreprise: 'ALL', client: 'ALL', lot: '', dateRange: { from: start, to: todayStr } });
+    setFiltersApplied(false);
   };
 
   const getExpiryStatus = (expiryDate?: string) => {
@@ -129,9 +132,11 @@ function App() {
   };
 
   const { inTxs, outTxs, inventory, headerAlert } = useMemo(() => {
-    const isAnyFilterActive = appliedFilters.entreprise !== 'ALL' || appliedFilters.client !== 'ALL' || appliedFilters.lot.trim() !== '';
+    if (!filtersApplied) {
+      return { inTxs: [], outTxs: [], inventory: [], headerAlert: null };
+    }
 
-    // 1. Filter Movements for the 3 tables
+    // 1. Filter Movements for the 3 tables (Direct movements for the selected range)
     const filterFn = (t: Transaction) => {
       const matchesDate = t.date >= appliedFilters.dateRange.from && t.date <= appliedFilters.dateRange.to;
       const matchesEnt = appliedFilters.entreprise === 'ALL' || t.entreprise === appliedFilters.entreprise;
@@ -144,8 +149,8 @@ function App() {
     const inTxs = displayMovements.filter(t => t.type === TransactionType.IN);
     const outTxs = displayMovements.filter(t => t.type === TransactionType.OUT);
 
-    // 2. Inventory Calculation with value logic: (Total Value / Total Qty) * Available Qty
-    // We calculate cumulative stock up to the 'To' date
+    // 2. Inventory Calculation (Cumulative up to the "To" date)
+    // Always group by Product, Unit, Enterprise, Client, and Lot (DUM Réf) to show actual references
     const invDataMap = new Map<string, {
       product: string;
       unit: string;
@@ -164,19 +169,16 @@ function App() {
         const matchesLot = appliedFilters.lot.trim() === '' || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
         
         if (matchesEnt && matchesCli && matchesLot) {
-          // If filtered: Aggregate by Product and Unit
-          // If NOT filtered: Detailed breakdown
-          const key = isAnyFilterActive 
-            ? `${t.product}_${t.unit}` 
-            : `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}_${t.lot || 'NA'}`;
+          // Key includes the Lot (DUM Réf) so we never show "MULTI"
+          const key = `${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}_${t.lot || 'NA'}`;
 
           if (!invDataMap.has(key)) {
             invDataMap.set(key, {
               product: t.product,
               unit: t.unit,
-              lot: isAnyFilterActive ? (appliedFilters.lot || 'MULTI') : (t.lot || '-'),
-              entreprise: isAnyFilterActive ? (appliedFilters.entreprise !== 'ALL' ? appliedFilters.entreprise : 'MULTI') : (t.entreprise || '-'),
-              client: isAnyFilterActive ? (appliedFilters.client !== 'ALL' ? appliedFilters.client : 'MULTI') : (t.client || '-'),
+              lot: t.lot || '-',
+              entreprise: t.entreprise || '-',
+              client: t.client || '-',
               sumInQty: 0,
               sumOutQty: 0,
               sumInValue: 0
@@ -197,8 +199,7 @@ function App() {
     const displayInv: InventoryItem[] = Array.from(invDataMap.values())
       .map(entry => {
         const availableQty = entry.sumInQty - entry.sumOutQty;
-        // Formula: (Valeur totale IN / Quantité ENTREE) * Quantité DISPONIBLE
-        // Simplified: Unit Price * Available Qty
+        // Formula: (Total Value IN / Total Qty IN) * Available Qty
         const unitPrice = entry.sumInQty > 0 ? entry.sumInValue / entry.sumInQty : 0;
         const totalValueDhs = unitPrice * availableQty;
 
@@ -215,13 +216,12 @@ function App() {
       .filter(i => Math.abs(i.availableQty) > 0.001)
       .sort((a, b) => a.product.localeCompare(b.product));
 
-    // Alerts
     const hasRed = transactions.some(t => t.type === TransactionType.IN && getExpiryStatus(t.expiryDate) === 'red');
     const hasYellow = transactions.some(t => t.type === TransactionType.IN && getExpiryStatus(t.expiryDate) === 'yellow');
     const headerAlert = hasRed ? 'red' : (hasYellow ? 'yellow' : null);
 
     return { inTxs, outTxs, inventory: displayInv, headerAlert };
-  }, [transactions, appliedFilters]);
+  }, [transactions, appliedFilters, filtersApplied]);
 
   const formatNum = (num: number) => {
     const parts = num.toFixed(2).split('.');
@@ -233,6 +233,21 @@ function App() {
     if (!dateStr) return '-';
     const [y, m, d] = dateStr.split('-');
     return `${d}/${m}/${y}`;
+  };
+
+  const handleExportExcel = () => {
+    let csvContent = "\uFEFF"; 
+    const sep = ";";
+    csvContent += "=== STOCK DISPONIBLE ===\nPRODUIT;ENTREPRISE;CLIENT;DUM Entrée Réf;QUANTITE;UNITE;VALEUR RESTANTE (DHS)\n";
+    inventory.forEach(item => { 
+      csvContent += `${item.product}${sep}${item.entreprise || ''}${sep}${item.client || ''}${sep}${item.lot || ''}${sep}${formatNum(item.availableQty)}${sep}${item.unit}${sep}${item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : ''}\n`; 
+    });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Rapport_Stock_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
   };
 
   const handleExportPDF = () => {
@@ -263,7 +278,7 @@ function App() {
     doc.text("STOCK DISPONIBLE", 14, currentY);
     autoTable(doc, {
       startY: currentY + 5,
-      head: [['Produit', 'Client', 'Entreprise', 'Lot', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
+      head: [['Produit', 'Client', 'Entreprise', 'DUM Entrée Réf', 'Quantité', 'Unité', ...(showValues ? ['Valeur (Dhs)'] : [])]],
       body: inventory.map(i => [i.product, i.client || '-', i.entreprise || '-', i.lot || '-', formatNum(i.availableQty), i.unit, ...(showValues ? [i.totalValueDhs !== undefined ? formatNum(i.totalValueDhs) : '-'] : [])]),
       foot: showValues ? [['TOTAL', '', '', '', '', '', formatNum(totalInventoryValue)]] : undefined,
       theme: 'grid',
@@ -383,9 +398,13 @@ function App() {
           <button onClick={() => openModal(TransactionType.OUT)} className="bg-red-600 hover:bg-red-700 text-white px-10 py-4 rounded-xl font-black shadow-lg shadow-red-500/20 text-lg transition-all active:scale-95 uppercase tracking-wider">- SORTIE</button>
         </div>
         <div className="flex items-center gap-4 flex-1 justify-center xl:justify-end w-full xl:w-auto">
-          <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-6 py-3 rounded-lg text-base font-bold border-2 border-red-200 transition-colors">
+          <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-4 py-2 rounded-lg text-sm font-bold border-2 border-red-200 transition-colors">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
             PDF
+          </button>
+          <button onClick={handleExportExcel} className="flex items-center gap-2 text-green-700 hover:bg-green-100 px-4 py-2 rounded-lg text-sm font-bold border-2 border-green-200 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+            Excel
           </button>
         </div>
       </header>
@@ -482,20 +501,24 @@ function App() {
                 <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
               </thead>
               <tbody>
-                {inventory.map((item, idx) => (
-                  <tr key={`${item.product}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
-                    <td className="p-2">
-                      <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
-                      <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
-                        {item.entreprise && item.entreprise !== 'MULTI' && <span>{item.entreprise}</span>}
-                        {item.client && item.client !== 'MULTI' && <span>• {item.client}</span>}
-                        {item.lot && item.lot !== 'MULTI' && item.lot !== '-' && <span className="text-blue-600 dark:text-blue-400">• Réf: {item.lot}</span>}
-                      </div>
-                    </td>
-                    <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
-                    {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : '-'}</td>}
-                  </tr>
-                ))}
+                {inventory.length === 0 ? (
+                  <tr><td colSpan={showValues ? 3 : 2} className="p-8 text-center text-gray-400 italic">Aucun mouvement</td></tr>
+                ) : (
+                  inventory.map((item, idx) => (
+                    <tr key={`${item.product}_${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
+                      <td className="p-2">
+                        <div className="font-bold text-gray-800 dark:text-gray-200">{item.product}</div>
+                        <div className="flex flex-wrap gap-x-2 text-[10px] text-gray-500 uppercase font-medium">
+                          {item.entreprise && <span>{item.entreprise}</span>}
+                          {item.client && <span>• {item.client}</span>}
+                          {item.lot && item.lot !== '-' && <span className="text-blue-600 dark:text-blue-400">• Réf: {item.lot}</span>}
+                        </div>
+                      </td>
+                      <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">{formatNum(item.availableQty)} <span className="text-[10px] font-normal opacity-60">{item.unit}</span></td>
+                      {showValues && <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">{item.totalValueDhs !== undefined ? formatNum(item.totalValueDhs) : '-'}</td>}
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
