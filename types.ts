@@ -15,6 +15,7 @@ export interface Transaction {
   entreprise?: string; 
   client?: string;
   lot?: string;
+  ngp?: string; // New NGP field
   product: string;
   unit: UnitType;
   qty: number;
@@ -25,11 +26,13 @@ export interface Transaction {
 export interface InventoryItem {
   product: string;
   lot: string;
+  ngp?: string;
   unit: UnitType;
   availableQty: number;
   entreprise?: string;
   client?: string;
   totalValueDhs?: number;
+  year?: string; // Added for Year grouping
 }
 
 export interface DateRange {
