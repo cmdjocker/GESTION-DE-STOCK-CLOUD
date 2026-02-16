@@ -56,6 +56,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Security check remains internal
     if (securityCode !== '2026') {
       alert('Code de sécurité incorrect. Accès refusé.');
       return;
@@ -212,7 +213,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
       <div className="bg-blue-50 dark:bg-blue-900/20 p-2 rounded-lg border border-blue-200 dark:border-blue-800">
         <label className="block text-[10px] font-bold mb-1 text-blue-800 dark:text-blue-300 flex items-center gap-1">
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-          SÉCURITÉ (Code: 2026)
+          SÉCURITÉ
         </label>
         <input 
           type="password" 
@@ -220,7 +221,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
           value={securityCode} 
           onChange={(e) => setSecurityCode(e.target.value)} 
           className="w-full border border-blue-200 dark:border-blue-700 rounded p-1 bg-white dark:bg-gray-700 text-xs outline-none focus:ring-1 focus:ring-blue-500" 
-          placeholder="Code" 
+          placeholder="Entrez le code..." 
         />
       </div>
 

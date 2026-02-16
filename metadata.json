@@ -1,5 +1,5 @@
 {
-  "name": "Copy of final of Gestion d'Entrepôt",
+  "name": "final version of Gestion d'Entrepôt",
   "description": "A warehouse management platform replicating a 3-column IN/OUT/Available inventory tracking system with local data persistence.",
   "requestFramePermissions": []
 }
