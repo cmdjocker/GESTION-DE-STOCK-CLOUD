@@ -1,3 +1,8 @@
+// RESTORE POINT BACKUP - 2026-02-25
+// Features: Client-grouped Slider, Unique DUM Ref, Empty Date Filter Default
+
+// To restore this file, copy its content back to /App.tsx
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Transaction, TransactionType, InventoryItem, DateRange, UnitType } from './types';
@@ -876,32 +881,33 @@ function App() {
           <div className="flex-1 overflow-auto custom-scrollbar">
             <table className={`w-full text-left ${tableFontSize}`}>
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-[10px] text-gray-500 z-10">
-                <tr><th className="p-2">PRODUIT</th><th className="p-2 text-right">DISPO</th>{showValues && <th className="p-2 text-right">VALEUR</th>}</tr>
+                <tr>
+                  <th className="p-2">Produit / NGP</th>
+                  <th className="p-2 text-right">Stock</th>
+                  {showValues && <th className="p-2 text-right">Valeur (Dhs)</th>}
+                </tr>
               </thead>
-              <tbody>
-                {renderStockItems()}
-              </tbody>
+              <tbody>{renderStockItems()}</tbody>
             </table>
           </div>
         </div>
       </main>
 
-      <footer className="bg-white dark:bg-gray-800 border-t py-1 text-center text-[9px] font-bold">
-        <span className="text-gray-400">
-          © 2026 Abdellah – Software Developer. All rights reserved.
-        </span>
-      </footer>
-
-      <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTx ? "MODIFIER" : "AJOUTER"}>
-        <EntryForm 
-          key={editingTx?.id || 'new'}
-          type={modalType}
-          initialData={editingTx || undefined}
-          onSubmit={handleSaveTransaction}
-          onCancel={closeModal}
-          onDelete={editingTx ? () => handleDelete(editingTx.id) : undefined}
-        />
-      </Modal>
+      <AnimatePresence>
+        {isModalOpen && (
+          <Modal onClose={closeModal} title={editingTx ? 'MODIFIER MOUVEMENT' : (modalType === TransactionType.IN ? 'NOUVELLE ENTRÉE' : 'NOUVELLE SORTIE')}>
+            <EntryForm 
+              type={modalType} 
+              initialData={editingTx || undefined} 
+              onSave={handleSaveTransaction} 
+              onDelete={editingTx ? () => handleDelete(editingTx.id) : undefined}
+              onCancel={closeModal}
+              entreprises={entreprisesList}
+              clients={clientsList}
+            />
+          </Modal>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
