@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A warehouse movement (IN or OUT)",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "format": "date" },
+        "product": { "type": "string" },
+        "qty": { "type": "number" },
+        "unit": { "type": "string" },
+        "type": { "type": "string", "enum": ["IN", "OUT"] },
+        "lot": { "type": "string" },
+        "ngp": { "type": "string" },
+        "entreprise": { "type": "string" },
+        "client": { "type": "string" },
+        "valueDhs": { "type": "number" },
+        "expiryDate": { "type": "string", "format": "date" }
+      },
+      "required": ["date", "product", "qty", "unit", "type"]
+    },
+    "ListItem": {
+      "title": "ListItem",
+      "description": "A generic list item (product, entreprise, or client)",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A user of the application",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "user"] }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "transactions": {
+      "schema": "Transaction",
+      "description": "Collection of warehouse transactions"
+    },
+    "products": {
+      "schema": "ListItem",
+      "description": "Collection of product names"
+    },
+    "entreprises": {
+      "schema": "ListItem",
+      "description": "Collection of entreprise names"
+    },
+    "clients": {
+      "schema": "ListItem",
+      "description": "Collection of client names"
+    },
+    "users": {
+      "schema": "User",
+      "description": "Collection of user profiles"
+    }
+  }
+}

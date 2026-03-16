@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: transactions
+    // Fields:
+    //   - date: string (required) - ISO date
+    //   - product: string (required)
+    //   - qty: number (required)
+    //   - unit: string (required)
+    //   - type: string (required, enum: ["IN", "OUT"])
+    //   - lot: string (optional)
+    //   - ngp: string (optional)
+    //   - entreprise: string (optional)
+    //   - client: string (optional)
+    //   - valueDhs: number (optional)
+    //   - expiryDate: string (optional)
+    //
+    // Collection: products, entreprises, clients
+    // Fields:
+    //   - name: string (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "moutezavm@gmail.com" && request.auth.token.email_verified == true) ||
+         (request.auth.token.email == "abdellahpcbureau@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['date', 'product', 'qty', 'unit', 'type']) &&
+             data.date is string &&
+             data.product is string && data.product.size() > 0 && data.product.size() < 200 &&
+             data.qty is number &&
+             data.unit is string &&
+             data.type in ['IN', 'OUT'] &&
+             (!('lot' in data) || (data.lot is string && data.lot.size() < 100)) &&
+             (!('ngp' in data) || (data.ngp is string && data.ngp.size() < 100)) &&
+             (!('entreprise' in data) || (data.entreprise is string && data.entreprise.size() < 200)) &&
+             (!('client' in data) || (data.client is string && data.client.size() < 200)) &&
+             (!('valueDhs' in data) || data.valueDhs is number) &&
+             (!('expiryDate' in data) || data.expiryDate is string);
+    }
+
+    function isValidListItem(data) {
+      return data.keys().hasAll(['name']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 200;
+    }
+
+    match /transactions/{txId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow update: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /products/{itemId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidListItem(request.resource.data);
+    }
+
+    match /entreprises/{itemId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidListItem(request.resource.data);
+    }
+
+    match /clients/{itemId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidListItem(request.resource.data);
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow write: if isAdmin();
+    }
+  }
+}
