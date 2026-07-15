@@ -5,7 +5,9 @@ export enum TransactionType {
 
 export enum UnitType {
   KG = 'KG',
-  NOMBRE = 'Nombre'
+  NOMBRE = 'Nombre',
+  LOG = 'LOG',
+  SESSION = 'SESSION'
 }
 
 export interface Transaction {
@@ -14,6 +16,8 @@ export interface Transaction {
   date: string; // YYYY-MM-DD
   entreprise?: string; 
   client?: string;
+  originalClient?: string;
+  originalEntreprise?: string;
   lot?: string;
   ngp?: string; // New NGP field
   product: string;
@@ -38,4 +42,12 @@ export interface InventoryItem {
 export interface DateRange {
   from: string;
   to: string;
+}
+
+export interface AuditLog {
+  id?: string;
+  timestamp: string; // ISO string
+  userEmail: string;
+  action: string; // "AJOUT" | "MODIFICATION" | "SUPPRESSION" | "AJOUT_PRODUIT" etc.
+  details: string;
 }

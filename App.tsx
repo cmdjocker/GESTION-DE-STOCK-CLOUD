@@ -1,13 +1,18 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Transaction, TransactionType, InventoryItem, DateRange, UnitType } from './types';
+import { Transaction, TransactionType, InventoryItem, DateRange, UnitType, AuditLog } from './types';
 import { 
   subscribeTransactions, 
   subscribeProducts, 
   subscribeEntreprises, 
   subscribeClients,
   saveTransaction,
-  deleteTransaction
+  deleteTransaction,
+  addAuditLog,
+  subscribeAuditLogs,
+  registerUserSession,
+  subscribeActiveSessions,
+  disconnectUserSession
 } from './services/storageService';
 import { auth } from './services/firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, User, signOut } from 'firebase/auth';
@@ -27,7 +32,6 @@ function App() {
   const [entreprisesList, setEntreprisesList] = useState<string[]>([]);
   const [clientsList, setClientsList] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sliderIndex, setSliderIndex] = useState(0);
   
   const [showValues, setShowValues] = useState(false);
   const [showHistoryUI, setShowHistoryUI] = useState(false); 
@@ -35,6 +39,30 @@ function App() {
   const [separateByYear, setSeparateByYear] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [filtersApplied, setFiltersApplied] = useState(false);
+
+  const [isLogsModalOpen, setIsLogsModalOpen] = useState(false);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [deleteSecurityCode, setDeleteSecurityCode] = useState('');
+  const [searchLogQuery, setSearchLogQuery] = useState('');
+
+  const [isSessionsModalOpen, setIsSessionsModalOpen] = useState(false);
+  const [activeSessions, setActiveSessions] = useState<any[]>([]);
+  const [sessionConfirmKickAll, setSessionConfirmKickAll] = useState(false);
+  const [sessionSuccessMessage, setSessionSuccessMessage] = useState('');
+
+  useEffect(() => {
+    if (user?.email === "abdellahpcbureau@gmail.com") {
+      const unsubLogs = subscribeAuditLogs(setLogs);
+      const unsubSessions = subscribeActiveSessions(setActiveSessions);
+      return () => {
+        unsubLogs();
+        unsubSessions();
+      };
+    } else {
+      setLogs([]);
+      setActiveSessions([]);
+    }
+  }, [user]);
 
   useEffect(() => {
     if (theme === 'dark') document.documentElement.classList.add('dark');
@@ -44,42 +72,45 @@ function App() {
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
 
-  const lastTxs = useMemo(() => {
-    if (!transactions || transactions.length === 0) return [];
-    const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  const processedTransactions = useMemo(() => {
+    if (!transactions) return [];
     
-    const clientGroups = new Map<string, Transaction[]>();
+    // 1. Build a map of DUM -> Owner (client, entreprise) from IN transactions
+    const dumOwnerMap = new Map<string, { client: string; entreprise: string }>();
     
-    for (const tx of sorted) {
-      const client = tx.client || 'SANS CLIENT';
-      if (!clientGroups.has(client)) {
-        clientGroups.set(client, []);
+    transactions.forEach(t => {
+      if (t.type === TransactionType.IN && t.lot) {
+        const normalizedLot = t.lot.trim().toUpperCase();
+        if (normalizedLot && t.client) {
+          if (!dumOwnerMap.has(normalizedLot)) {
+            dumOwnerMap.set(normalizedLot, {
+              client: t.client,
+              entreprise: t.entreprise || ''
+            });
+          }
+        }
       }
-      
-      const group = clientGroups.get(client)!;
-      // Check if we already have this DUM Ref in this client's group
-      const lotKey = tx.lot?.trim() || `no-lot-${tx.id}`;
-      const alreadyHasLot = group.some(t => (t.lot?.trim() || `no-lot-${t.id}`) === lotKey);
-      
-      if (!alreadyHasLot && group.length < 3) {
-        group.push(tx);
+    });
+
+    // 2. Adjust OUT transactions if their DUM is the same as an IN transaction for another client
+    return transactions.map(t => {
+      if (t.type === TransactionType.OUT && t.lot) {
+        const normalizedLot = t.lot.trim().toUpperCase();
+        const owner = dumOwnerMap.get(normalizedLot);
+        if (owner && owner.client && owner.client.toUpperCase() !== (t.client || '').toUpperCase()) {
+          return {
+            ...t,
+            originalClient: t.client,
+            originalEntreprise: t.entreprise,
+            client: owner.client,
+            entreprise: owner.entreprise
+          };
+        }
       }
-    }
-    
-    // Flatten and sort by date descending again to keep it chronological
-    return Array.from(clientGroups.values())
-      .flat()
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      return t;
+    });
   }, [transactions]);
 
-  useEffect(() => {
-    if (lastTxs.length <= 1) return;
-    const interval = setInterval(() => {
-      setSliderIndex((prev) => (prev + 1) % lastTxs.length);
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [lastTxs.length]);
-  
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user);
@@ -92,7 +123,8 @@ function App() {
     if (!user) return;
 
     const unsubTx = subscribeTransactions((data) => {
-      setTransactions(data);
+      const realTxs = data.filter(t => t.unit !== "LOG" && t.unit !== "SESSION");
+      setTransactions(realTxs);
       setLoading(false);
     });
     const unsubProd = subscribeProducts(() => {}); 
@@ -104,6 +136,27 @@ function App() {
       unsubEnt();
       unsubCli();
     };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    registerUserSession(user);
+
+    const sessionDocId = `SESSION_${user.uid}`;
+    const unsubSession = onSnapshot(doc(db, "transactions", sessionDocId), (docSnapshot) => {
+      if (docSnapshot.exists()) {
+        const data = docSnapshot.data();
+        if (data && data.unit === "SESSION" && data.entreprise === "disconnected") {
+          console.log("Session disconnected remotely by admin.");
+          signOut(auth);
+        }
+      }
+    }, (error) => {
+      console.warn("Session check error: ", error);
+    });
+
+    return () => unsubSession();
   }, [user]);
 
   const handleLogin = async () => {
@@ -129,8 +182,8 @@ function App() {
       return;
     }
     
-    // Default admins
-    if (user.email === "moutezavm@gmail.com" || user.email === "abdellahpcbureau@gmail.com") {
+    // Default admin
+    if (user.email === "abdellahpcbureau@gmail.com") {
       setRole('admin');
       return;
     }
@@ -168,10 +221,17 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalType, setModalType] = useState<TransactionType>(TransactionType.IN);
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const handleSaveTransaction = async (txData: Omit<Transaction, 'id'>) => {
     try {
       await saveTransaction(txData, editingTx?.id);
+      
+      const isEdit = !!editingTx;
+      const actionType = isEdit ? "MODIFICATION" : (txData.type === TransactionType.IN ? "AJOUT ENTRÉE" : "AJOUT SORTIE");
+      const details = `${isEdit ? "Modification" : "Ajout"} - Réf DUM: ${txData.lot || '-'} | Prod: ${txData.product} | Qty: ${txData.qty} ${txData.unit} | Client: ${txData.client || '-'}`;
+      await addAuditLog(actionType, details);
+
       setIsModalOpen(false);
       setEditingTx(null);
     } catch (err) {
@@ -179,15 +239,33 @@ function App() {
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (window.confirm('Voulez-vous vraiment supprimer cette entrée ?')) {
-      try {
-        await deleteTransaction(id);
-        setIsModalOpen(false);
-        setEditingTx(null);
-      } catch (err) {
-        alert("Erreur lors de la suppression : " + err);
+  const handleDelete = (id: string) => {
+    setDeleteConfirmId(id);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteConfirmId) return;
+
+    if (deleteSecurityCode !== "2026") {
+      alert("Code de sécurité incorrect. Suppression annulée.");
+      return;
+    }
+
+    try {
+      const txToDelete = transactions.find(t => t.id === deleteConfirmId);
+      await deleteTransaction(deleteConfirmId);
+      
+      if (txToDelete) {
+        const details = `Suppression - Réf DUM: ${txToDelete.lot || '-'} | Prod: ${txToDelete.product} | Qty: ${txToDelete.qty} ${txToDelete.unit} | Client: ${txToDelete.client || '-'}`;
+        await addAuditLog("SUPPRESSION", details);
       }
+
+      setIsModalOpen(false);
+      setEditingTx(null);
+      setDeleteConfirmId(null);
+      setDeleteSecurityCode('');
+    } catch (err) {
+      alert("Erreur lors de la suppression : " + err);
     }
   };
 
@@ -243,18 +321,18 @@ function App() {
       const matchesDate = (!appliedFilters.dateRange.from || t.date >= appliedFilters.dateRange.from) && t.date <= appliedFilters.dateRange.to;
       const matchesEnt = !isEntSelected || t.entreprise === appliedFilters.entreprise;
       const matchesCli = !isCliSelected || t.client === appliedFilters.client;
-      const matchesLot = !isLotFiltered || (t.lot || '').toUpperCase().includes(appliedFilters.lot.trim().toUpperCase());
+      const matchesLot = !isLotFiltered || (t.lot || '').trim().toUpperCase() === appliedFilters.lot.trim().toUpperCase();
       return matchesDate && matchesEnt && matchesCli && matchesLot;
     };
 
-    const displayMovements = transactions.filter(filterFn).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    const displayMovements = processedTransactions.filter(filterFn).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     const inTxs = displayMovements.filter(t => t.type === TransactionType.IN);
     const outTxs = displayMovements.filter(t => t.type === TransactionType.OUT);
 
     // --- STEP 1: Map ALL Entrées to extract Lot Arrival Info ---
     // This must look at ALL transactions to properly attribute OUTs to their IN year.
     const lotArrivalMap = new Map<string, { arrivalYear: string, unitPrice: number, totalIn: number, totalValue: number }>();
-    transactions.forEach(t => {
+    processedTransactions.forEach(t => {
       if (t.type === TransactionType.IN) {
         const key = `${t.lot}_${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`;
         const existing = lotArrivalMap.get(key) || { arrivalYear: t.date.split('-')[0], unitPrice: 0, totalIn: 0, totalValue: 0 };
@@ -282,12 +360,13 @@ function App() {
       sumInQty: number;
     }>();
 
-    transactions.forEach(t => {
+    processedTransactions.forEach(t => {
       if (t.date <= appliedFilters.dateRange.to) {
         const matchesEnt = !isEntSelected || t.entreprise === appliedFilters.entreprise;
         const matchesCli = !isCliSelected || t.client === appliedFilters.client;
+        const matchesLot = !isLotFiltered || (t.lot || '').trim().toUpperCase() === appliedFilters.lot.trim().toUpperCase();
         
-        if (matchesEnt && matchesCli) {
+        if (matchesEnt && matchesCli && matchesLot) {
           const lotKey = `${t.lot}_${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`;
           const info = lotArrivalMap.get(lotKey);
           
@@ -354,7 +433,7 @@ function App() {
       });
 
     return { inTxs, outTxs, inventory: displayInv };
-  }, [transactions, appliedFilters, filtersApplied, separateByYear]);
+  }, [processedTransactions, appliedFilters, filtersApplied, separateByYear]);
 
   const formatNum = (num: number, decimals: number = 2) => {
     const safeNum = Math.abs(num) < 0.000001 ? 0 : num;
@@ -368,6 +447,34 @@ function App() {
     const [y, m, d] = dateStr.split('-');
     return `${d}/${m}/${y}`;
   };
+
+  const formatLogTime = (isoString: string) => {
+    try {
+      const d = new Date(isoString);
+      const day = String(d.getDate()).padStart(2, '0');
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const year = d.getFullYear();
+      const hours = String(d.getHours()).padStart(2, '0');
+      const minutes = String(d.getMinutes()).padStart(2, '0');
+      const seconds = String(d.getSeconds()).padStart(2, '0');
+      return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+    } catch {
+      return isoString;
+    }
+  };
+
+  const filteredLogs = useMemo(() => {
+    if (!logs) return [];
+    return logs.filter(log => {
+      const q = searchLogQuery.toLowerCase().trim();
+      if (!q) return true;
+      return (
+        log.userEmail.toLowerCase().includes(q) ||
+        log.action.toLowerCase().includes(q) ||
+        log.details.toLowerCase().includes(q)
+      );
+    });
+  }, [logs, searchLogQuery]);
 
   const handleExportExcel = () => {
     let csvContent = "\uFEFF"; 
@@ -588,9 +695,14 @@ function App() {
                <div className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full ${isIncoming ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>{isIncoming ? '↓' : '↑'}</div>
                <div className="flex flex-col">
                   <div className="font-bold text-gray-800 dark:text-gray-200 leading-tight truncate">{tx.product}</div>
-                  <div className="flex gap-2 text-[9px] uppercase font-medium">
+                  <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[9px] uppercase font-medium">
                      {tx.lot && <span className="text-gray-500">Réf: {tx.lot}</span>}
                      {tx.ngp && <span className="text-blue-500">NGP: {tx.ngp}</span>}
+                     {tx.originalClient && (
+                       <span className="text-amber-600 dark:text-amber-400 font-bold" title={`Originalement saisi pour le client: ${tx.originalClient}`}>
+                         ↳ Déduit de {tx.client} (saisi pour {tx.originalClient})
+                       </span>
+                     )}
                   </div>
                </div>
              </div>
@@ -600,8 +712,26 @@ function App() {
             <span className="text-[9px] text-gray-500 ml-1">{tx.unit}</span>
           </td>
           {isIncoming && showValues && <td className="py-1 px-2 text-right font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs, 3)}` : '-'}</td>}
-          <td className="py-1 px-2 text-center w-8">
-            <button onClick={() => openModal(tx.type, tx)} className="text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 p-1">✎</button>
+          <td className="py-1 px-2 text-center w-14">
+            <div className="flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button 
+                onClick={() => {
+                  const originalTx = transactions.find(t => t.id === tx.id) || tx;
+                  openModal(tx.type, originalTx);
+                }} 
+                className="text-gray-400 hover:text-blue-600 p-1" 
+                title="Modifier"
+              >
+                ✎
+              </button>
+              <button 
+                onClick={() => handleDelete(tx.id)} 
+                className="text-gray-400 hover:text-red-600 p-1" 
+                title="Supprimer"
+              >
+                🗑️
+              </button>
+            </div>
           </td>
         </tr>
       );
@@ -834,41 +964,6 @@ function App() {
           </div>
         </div>
         <div className="flex flex-col items-center gap-2 w-full xl:w-auto min-w-[350px] xl:min-w-[450px]">
-          {lastTxs.length > 0 && (
-            <div className="w-full h-10 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800/40 rounded-lg overflow-hidden flex items-center px-3 relative shadow-sm">
-              <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-red-500"></div>
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={lastTxs[sliderIndex]?.id || sliderIndex}
-                  initial={{ opacity: 0, x: 20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -20 }}
-                  transition={{ duration: 0.4, ease: "easeOut" }}
-                  className="flex items-center gap-3 text-xs font-bold text-red-900 dark:text-red-100 whitespace-nowrap overflow-hidden w-full"
-                >
-                  <span className={`px-2 py-0.5 rounded text-[10px] uppercase text-white shadow-sm ${lastTxs[sliderIndex]?.type === TransactionType.IN ? 'bg-green-600' : 'bg-red-600'}`}>
-                    {lastTxs[sliderIndex]?.type === TransactionType.IN ? 'ENTRÉE' : 'SORTIE'}
-                  </span>
-                  <span className="flex-shrink-0 text-gray-500 dark:text-gray-400">{formatDate(lastTxs[sliderIndex]?.date)}</span>
-                  <span className="opacity-20 text-lg">|</span>
-                  <span className="truncate" title={lastTxs[sliderIndex]?.lot}>
-                    <span className="text-[10px] text-gray-400 mr-1 uppercase font-normal">DUM:</span>
-                    {lastTxs[sliderIndex]?.lot || '-'}
-                  </span>
-                  <span className="opacity-20 text-lg">|</span>
-                  <span className="truncate flex-1" title={lastTxs[sliderIndex]?.product}>
-                    <span className="text-[10px] text-gray-400 mr-1 uppercase font-normal">Prod:</span>
-                    {lastTxs[sliderIndex]?.product}
-                  </span>
-                  <span className="opacity-20 text-lg">|</span>
-                  <span className="truncate" title={lastTxs[sliderIndex]?.client}>
-                    <span className="text-[10px] text-gray-400 mr-1 uppercase font-normal">Client:</span>
-                    {lastTxs[sliderIndex]?.client || '-'}
-                  </span>
-                </motion.div>
-              </AnimatePresence>
-            </div>
-          )}
           <div className="flex flex-none items-center justify-center gap-4 w-full">
             <button onClick={() => openModal(TransactionType.IN)} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-lg font-black shadow-lg shadow-green-500/20 text-sm transition-all active:scale-95 uppercase tracking-wider">+ ENTRÉE</button>
             <button onClick={() => openModal(TransactionType.OUT)} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-lg font-black shadow-lg shadow-red-500/20 text-sm transition-all active:scale-95 uppercase tracking-wider">- SORTIE</button>
@@ -876,6 +971,18 @@ function App() {
         </div>
         <div className="flex flex-col items-center gap-1 xl:items-end flex-1 w-full xl:w-auto">
            <div className="flex items-center gap-2">
+              {user?.email === "abdellahpcbureau@gmail.com" && (
+                <>
+                  <button onClick={() => setIsSessionsModalOpen(true)} className="flex items-center gap-2 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 px-3 py-1.5 rounded-lg text-xs font-bold border border-amber-200 dark:border-amber-800 transition-colors">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                    Utilisateurs ({activeSessions.length})
+                  </button>
+                  <button onClick={() => setIsLogsModalOpen(true)} className="flex items-center gap-2 text-blue-700 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 px-3 py-1.5 rounded-lg text-xs font-bold border border-blue-200 dark:border-blue-800 transition-colors">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                    Historique d'Activité
+                  </button>
+                </>
+              )}
               <button onClick={handleExportPDF} className="flex items-center gap-2 text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg text-xs font-bold border border-red-200 transition-colors">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
                 PDF
@@ -1007,8 +1114,233 @@ function App() {
           initialData={editingTx || undefined}
           onSubmit={handleSaveTransaction}
           onCancel={closeModal}
-          onDelete={editingTx && isAdmin ? () => handleDelete(editingTx.id) : undefined}
+          onDelete={editingTx ? () => handleDelete(editingTx.id) : undefined}
+          isMasterAdmin={user?.email === "abdellahpcbureau@gmail.com"}
         />
+      </Modal>
+
+      <Modal isOpen={deleteConfirmId !== null} onClose={() => { setDeleteConfirmId(null); setDeleteSecurityCode(''); }} title="CONFIRMATION DE SUPPRESSION">
+        <div className="space-y-4 text-left p-1">
+          <p className="text-sm text-gray-700 dark:text-gray-300">
+            Voulez-vous vraiment supprimer cette entrée ? Cette action est irréversible.
+          </p>
+          
+          <div className="bg-red-50 dark:bg-red-950/20 p-2.5 rounded-lg border border-red-200 dark:border-red-900/40 space-y-1">
+            <label className="block text-[10px] font-bold text-red-800 dark:text-red-300 flex items-center gap-1">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+              CODE DE SÉCURITÉ REQUIS
+            </label>
+            <input 
+              type="password" 
+              required 
+              value={deleteSecurityCode} 
+              onChange={(e) => setDeleteSecurityCode(e.target.value)} 
+              className="w-full border border-red-300 dark:border-red-800 rounded p-1.5 bg-white dark:bg-gray-800 text-xs outline-none focus:ring-1 focus:ring-red-500 text-gray-900 dark:text-gray-100" 
+              placeholder="Entrez le code de sécurité pour valider..." 
+            />
+          </div>
+
+          <div className="flex gap-2 justify-end pt-2 border-t border-gray-100 dark:border-gray-700">
+            <button 
+              type="button"
+              onClick={() => { setDeleteConfirmId(null); setDeleteSecurityCode(''); }} 
+              className="px-4 py-1.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-xs font-medium"
+            >
+              Annuler
+            </button>
+            <button 
+              type="button"
+              onClick={confirmDelete} 
+              className="px-6 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-bold shadow shadow-red-500/20 active:scale-95 transition-all"
+            >
+              Supprimer
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal isOpen={isLogsModalOpen} onClose={() => { setIsLogsModalOpen(false); setSearchLogQuery(''); }} title="HISTORIQUE D'ACTIVITÉ">
+        <div className="space-y-4 text-left p-1">
+          <div className="relative">
+            <input 
+              type="text" 
+              placeholder="Rechercher par utilisateur, action, produit ou lot..." 
+              value={searchLogQuery} 
+              onChange={(e) => setSearchLogQuery(e.target.value)} 
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-xs bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:ring-1 focus:ring-blue-500" 
+            />
+            {searchLogQuery && (
+              <button 
+                onClick={() => setSearchLogQuery('')} 
+                className="absolute right-2.5 top-2.5 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+              >
+                ✖
+              </button>
+            )}
+          </div>
+
+          <div className="max-h-[60vh] overflow-y-auto border border-gray-100 dark:border-gray-800 rounded-lg divide-y divide-gray-100 dark:divide-gray-800 bg-white dark:bg-gray-850">
+            {filteredLogs.length === 0 ? (
+              <div className="p-8 text-center text-gray-400 text-xs">
+                Aucune activité enregistrée.
+              </div>
+            ) : (
+              filteredLogs.map(log => {
+                let badgeColor = "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200";
+                if (log.action.includes("ENTRÉE")) badgeColor = "bg-green-100 text-green-800 dark:bg-green-950/40 dark:text-green-300 font-black";
+                else if (log.action.includes("SORTIE")) badgeColor = "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300 font-black";
+                else if (log.action.includes("SUPPRESSION")) badgeColor = "bg-red-600 text-white shadow-sm font-black";
+                else if (log.action.includes("MODIFICATION")) badgeColor = "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 font-black";
+                else if (log.action.includes("CREATION")) badgeColor = "bg-blue-100 text-blue-800 dark:bg-blue-950/40 dark:text-blue-300 font-black";
+
+                return (
+                  <div key={log.id} className="p-3 flex flex-col md:flex-row md:items-start justify-between gap-3 text-xs hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors">
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-gray-800 dark:text-gray-200">{log.userEmail}</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] uppercase ${badgeColor}`}>
+                          {log.action}
+                        </span>
+                      </div>
+                      <p className="text-gray-600 dark:text-gray-300 leading-relaxed font-mono text-[11px]">{log.details}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0 self-start">
+                      <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono font-bold">{formatLogTime(log.timestamp)}</span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button 
+              type="button"
+              onClick={() => { setIsLogsModalOpen(false); setSearchLogQuery(''); }} 
+              className="px-5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold shadow shadow-blue-500/20 active:scale-95 transition-all"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Connected Users Modal */}
+      <Modal isOpen={isSessionsModalOpen} onClose={() => { setIsSessionsModalOpen(false); setSessionConfirmKickAll(false); setSessionSuccessMessage(''); }} title="UTILISATEURS CONNECTÉS">
+        <div className="space-y-4 text-left p-1">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Voici la liste en temps réel des utilisateurs actuellement connectés à la plateforme. Vous pouvez forcer la déconnexion de n'importe quel utilisateur ou de tous à la fois.
+          </p>
+
+          {sessionSuccessMessage && (
+            <div className="bg-green-50 dark:bg-green-950/20 text-green-800 dark:text-green-300 p-2.5 rounded-lg border border-green-200 dark:border-green-900/40 text-xs font-bold flex items-center justify-between">
+              <span>{sessionSuccessMessage}</span>
+              <button onClick={() => setSessionSuccessMessage('')} className="text-[10px] opacity-70 hover:opacity-100">✕</button>
+            </div>
+          )}
+
+          {sessionConfirmKickAll ? (
+            <div className="bg-red-50 dark:bg-red-950/20 p-3 rounded-lg border border-red-200 dark:border-red-900/40 space-y-2">
+              <p className="text-xs font-bold text-red-800 dark:text-red-300">
+                ⚠️ Êtes-vous sûr de vouloir déconnecter TOUS les autres utilisateurs connectés ?
+              </p>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setSessionConfirmKickAll(false)}
+                  className="px-3 py-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200 rounded text-[11px] font-bold transition-all"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    let count = 0;
+                    for (const session of activeSessions) {
+                      if (session.uid !== user?.uid) {
+                        await disconnectUserSession(session.id);
+                        count++;
+                      }
+                    }
+                    setSessionConfirmKickAll(false);
+                    setSessionSuccessMessage(`${count} utilisateur(s) ont été déconnectés.`);
+                  }}
+                  className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[11px] font-bold shadow shadow-red-500/10 transition-all"
+                >
+                  Oui, déconnecter tout le monde
+                </button>
+              </div>
+            </div>
+          ) : (
+            activeSessions.length > 1 && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setSessionConfirmKickAll(true)}
+                  className="px-3 py-1.5 bg-red-50 hover:bg-red-100 dark:bg-red-950/20 dark:hover:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-900/50 rounded-lg text-xs font-bold transition-colors flex items-center gap-1"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                  Déconnecter tout le monde
+                </button>
+              </div>
+            )
+          )}
+
+          <div className="max-h-[50vh] overflow-y-auto border border-gray-100 dark:border-gray-800 rounded-lg divide-y divide-gray-100 dark:divide-gray-800 bg-white dark:bg-gray-850">
+            {activeSessions.length === 0 ? (
+              <div className="p-8 text-center text-gray-400 text-xs">
+                Aucun utilisateur connecté.
+              </div>
+            ) : (
+              activeSessions.map(session => {
+                const isMe = session.uid === user?.uid;
+                return (
+                  <div key={session.id} className="p-3 flex items-center justify-between gap-3 text-xs hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors">
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-gray-800 dark:text-gray-200 truncate">{session.email}</span>
+                        {isMe && (
+                          <span className="bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">
+                            Moi (Admin)
+                          </span>
+                        )}
+                        <span className="flex h-2 w-2 relative">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+                        Dernier accès: {session.lastActive ? new Date(session.lastActive).toLocaleTimeString() : 'N/A'}
+                      </p>
+                    </div>
+                    {!isMe && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await disconnectUserSession(session.id);
+                          setSessionSuccessMessage(`L'utilisateur ${session.email} a été déconnecté.`);
+                        }}
+                        className="flex-shrink-0 px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] font-bold shadow-sm transition-all hover:scale-105 active:scale-95"
+                      >
+                        Expulser
+                      </button>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="flex justify-end pt-2 border-t border-gray-100 dark:border-gray-700">
+            <button 
+              type="button"
+              onClick={() => { setIsSessionsModalOpen(false); setSessionConfirmKickAll(false); setSessionSuccessMessage(''); }} 
+              className="px-5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold shadow shadow-blue-500/20 active:scale-95 transition-all"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

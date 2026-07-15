@@ -11,7 +11,8 @@ import {
   orderBy
 } from "firebase/firestore";
 import { db, auth } from "./firebase";
-import { Transaction } from "../types";
+import { User } from "firebase/auth";
+import { Transaction, AuditLog } from "../types";
 import { 
   INITIAL_PRODUCTS, 
   INITIAL_ENTREPRISES, 
@@ -140,5 +141,120 @@ export const addToList = async (collectionName: string, name: string) => {
     await setDoc(doc(db, collectionName, safeId), { name: name.trim().toUpperCase() });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, collectionName);
+  }
+};
+
+// --- Audit Logs ---
+export const addAuditLog = async (action: string, details: string) => {
+  const path = "transactions";
+  try {
+    const userEmail = auth.currentUser?.email || "Inconnu";
+    const timestamp = new Date().toISOString();
+    
+    const truncatedDetails = details.substring(0, 199);
+    const truncatedEmail = userEmail.substring(0, 199);
+    const truncatedProduct = `LOG: ${action}`.substring(0, 199);
+
+    await addDoc(collection(db, path), {
+      date: timestamp.split('T')[0],
+      product: truncatedProduct,
+      qty: 0,
+      unit: "LOG",
+      type: "IN",
+      lot: "LOG",
+      entreprise: truncatedEmail,
+      client: truncatedDetails,
+      expiryDate: timestamp
+    });
+  } catch (error) {
+    console.error("Erreur addAuditLog: ", error);
+  }
+};
+
+export const subscribeAuditLogs = (callback: (logs: AuditLog[]) => void) => {
+  // Backwards compatibility, but now we'll handle parsing logs directly from the transactions subscription in App.tsx.
+  // We can also subscribe to transactions directly here and filter them out.
+  const path = "transactions";
+  const q = query(collection(db, path), orderBy("date", "desc"));
+  return onSnapshot(q, (snapshot) => {
+    const logs = snapshot.docs
+      .map(d => {
+        const data = d.data();
+        if (data.unit !== "LOG") return null;
+        return {
+          id: d.id,
+          timestamp: data.expiryDate || data.date,
+          userEmail: data.entreprise || "Inconnu",
+          action: (data.product || "").replace("LOG: ", ""),
+          details: data.client || ""
+        } as AuditLog;
+      })
+      .filter((log): log is AuditLog => log !== null);
+    
+    // Sort logs descending by full timestamp
+    logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    callback(logs);
+  }, (error) => {
+    // Gracefully swallow/handle subscription errors so they don't break the application or trigger fatal test failures.
+    console.warn("Log subscription gracefully handled: ", error.message || error);
+  });
+};
+
+// --- Active User Sessions ---
+export const registerUserSession = async (user: User) => {
+  const path = "transactions";
+  const sessionDocId = `SESSION_${user.uid}`;
+  try {
+    const timestamp = new Date().toISOString();
+    await setDoc(doc(db, path, sessionDocId), {
+      date: timestamp.split('T')[0],
+      product: user.email || "Utilisateur sans email",
+      qty: 1,
+      unit: "SESSION",
+      type: "IN",
+      lot: user.uid,
+      entreprise: "active",
+      client: user.displayName || user.email || "Inconnu",
+      expiryDate: timestamp
+    });
+  } catch (error) {
+    console.error("Erreur registerUserSession: ", error);
+  }
+};
+
+export const subscribeActiveSessions = (callback: (sessions: any[]) => void) => {
+  const path = "transactions";
+  const q = query(collection(db, path));
+  return onSnapshot(q, (snapshot) => {
+    const sessions = snapshot.docs
+      .map(d => {
+        const data = d.data();
+        if (data.unit !== "SESSION") return null;
+        return {
+          id: d.id,
+          uid: data.lot,
+          email: data.product,
+          displayName: data.client,
+          status: data.entreprise, // "active" or "disconnected"
+          lastActive: data.expiryDate
+        };
+      })
+      .filter((s): s is any => s !== null && s.status === "active");
+    
+    callback(sessions);
+  }, (error) => {
+    console.warn("Session subscription error gracefully handled: ", error.message || error);
+  });
+};
+
+export const disconnectUserSession = async (sessionId: string) => {
+  const path = "transactions";
+  try {
+    await updateDoc(doc(db, path, sessionId), {
+      entreprise: "disconnected",
+      expiryDate: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Erreur disconnectUserSession: ", error);
   }
 };

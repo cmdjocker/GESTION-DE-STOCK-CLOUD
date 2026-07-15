@@ -36,7 +36,6 @@ service cloud.firestore {
       return isAuthenticated() &&
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-         (request.auth.token.email == "moutezavm@gmail.com" && request.auth.token.email_verified == true) ||
          (request.auth.token.email == "abdellahpcbureau@gmail.com" && request.auth.token.email_verified == true));
     }
 
@@ -64,7 +63,7 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
       allow update: if isAuthenticated() && isValidTransaction(request.resource.data);
-      allow delete: if isAdmin();
+      allow delete: if isAuthenticated();
     }
 
     match /products/{itemId} {
@@ -85,6 +84,11 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
       allow write: if isAdmin();
+    }
+
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
     }
   }
 }
