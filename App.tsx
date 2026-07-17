@@ -49,6 +49,24 @@ function App() {
   const [activeSessions, setActiveSessions] = useState<any[]>([]);
   const [sessionConfirmKickAll, setSessionConfirmKickAll] = useState(false);
   const [sessionSuccessMessage, setSessionSuccessMessage] = useState('');
+  const [selectedStockKey, setSelectedStockKey] = useState<string | null>(null);
+  const [selectedEntreeId, setSelectedEntreeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedEntreeId(null);
+  }, [selectedStockKey]);
+
+  const selectedProductInfo = useMemo(() => {
+    if (!selectedStockKey) return null;
+    const parts = selectedStockKey.split('_');
+    return {
+      product: parts[0],
+      unit: parts[1],
+      entreprise: parts[2] === 'NA' ? '' : parts[2],
+      client: parts[3] === 'NA' ? '' : parts[3],
+      year: parts[4] === '-' ? '' : parts[4]
+    };
+  }, [selectedStockKey]);
 
   useEffect(() => {
     if (user?.email === "abdellahpcbureau@gmail.com") {
@@ -110,6 +128,93 @@ function App() {
       return t;
     });
   }, [transactions]);
+
+  const fifoAllocation = useMemo(() => {
+    const inTxAvailableMap = new Map<string, number>();
+    const outTxToInTxsMap = new Map<string, { inTxId: string; qtyAllocated: number }[]>();
+    const inTxToOutTxsMap = new Map<string, { outTxId: string; qtyAllocated: number }[]>();
+
+    if (!processedTransactions || processedTransactions.length === 0) {
+      return { inTxAvailableMap, outTxToInTxsMap, inTxToOutTxsMap };
+    }
+
+    const groups = new Map<string, { ins: Transaction[]; outs: Transaction[] }>();
+
+    processedTransactions.forEach(t => {
+      const lot = (t.lot || '').trim().toUpperCase();
+      const product = (t.product || '').trim().toUpperCase();
+      const unit = (t.unit || '').trim();
+      const entreprise = (t.entreprise || 'NA').trim().toUpperCase();
+      const client = (t.client || 'NA').trim().toUpperCase();
+      
+      const key = `${lot}_${product}_${unit}_${entreprise}_${client}`;
+
+      if (!groups.has(key)) {
+        groups.set(key, { ins: [], outs: [] });
+      }
+
+      const group = groups.get(key)!;
+      if (t.type === TransactionType.IN) {
+        group.ins.push(t);
+      } else if (t.type === TransactionType.OUT) {
+        group.outs.push(t);
+      }
+    });
+
+    groups.forEach(({ ins, outs }) => {
+      const sortedIns = [...ins].sort((a, b) => {
+        const timeDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id.localeCompare(b.id);
+      });
+
+      const sortedOuts = [...outs].sort((a, b) => {
+        const timeDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id.localeCompare(b.id);
+      });
+
+      const inStates = sortedIns.map(tx => {
+        inTxAvailableMap.set(tx.id, tx.qty);
+        return {
+          id: tx.id,
+          originalQty: tx.qty,
+          availableQty: tx.qty,
+          tx
+        };
+      });
+
+      sortedOuts.forEach(outTx => {
+        let remainingOut = outTx.qty;
+        const allocations: { inTxId: string; qtyAllocated: number }[] = [];
+
+        for (const inState of inStates) {
+          if (remainingOut <= 0.000001) break;
+
+          if (inState.availableQty > 0.000001) {
+            const take = Math.min(inState.availableQty, remainingOut);
+            inState.availableQty -= take;
+            remainingOut -= take;
+
+            allocations.push({ inTxId: inState.id, qtyAllocated: take });
+
+            if (!inTxToOutTxsMap.has(inState.id)) {
+              inTxToOutTxsMap.set(inState.id, []);
+            }
+            inTxToOutTxsMap.get(inState.id)!.push({ outTxId: outTx.id, qtyAllocated: take });
+          }
+        }
+
+        outTxToInTxsMap.set(outTx.id, allocations);
+
+        inStates.forEach(inState => {
+          inTxAvailableMap.set(inState.id, inState.availableQty);
+        });
+      });
+    });
+
+    return { inTxAvailableMap, outTxToInTxsMap, inTxToOutTxsMap };
+  }, [processedTransactions]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -283,6 +388,7 @@ function App() {
   const handleApplyFilters = () => {
     setAppliedFilters({ entreprise: filterEntreprise, client: filterClient, lot: filterLot, dateRange: dateRange });
     setFiltersApplied(true);
+    setSelectedStockKey(null);
   };
 
   const resetFilters = () => {
@@ -292,6 +398,7 @@ function App() {
     setDateRange({ from: '', to: todayStr });
     setAppliedFilters({ entreprise: 'ALL', client: 'ALL', lot: '', dateRange: { from: '', to: todayStr } });
     setFiltersApplied(false);
+    setSelectedStockKey(null);
   };
 
   const getExpiryStatus = (expiryDate?: string) => {
@@ -432,8 +539,58 @@ function App() {
         return a.product.localeCompare(b.product);
       });
 
-    return { inTxs, outTxs, inventory: displayInv };
-  }, [processedTransactions, appliedFilters, filtersApplied, separateByYear]);
+    let finalInTxs = inTxs;
+    let finalOutTxs = outTxs;
+
+    if (selectedStockKey) {
+      const selectedItem = displayInv.find(i => `${i.product}_${i.unit}_${i.entreprise || 'NA'}_${i.client || 'NA'}_${i.year || '-'}` === selectedStockKey);
+      if (selectedItem) {
+        finalInTxs = inTxs.filter(t => {
+          const isProd = t.product === selectedItem.product;
+          const isUnit = t.unit === selectedItem.unit;
+          const isEnt = (t.entreprise || 'NA') === (selectedItem.entreprise || 'NA');
+          const isCli = (t.client || 'NA') === (selectedItem.client || 'NA');
+          if (separateByYear && selectedItem.year && selectedItem.year !== '-') {
+            const bucketYear = t.date.split('-')[0];
+            return isProd && isUnit && isEnt && isCli && bucketYear === selectedItem.year;
+          }
+          return isProd && isUnit && isEnt && isCli;
+        });
+
+        finalOutTxs = outTxs.filter(t => {
+          const isProd = t.product === selectedItem.product;
+          const isUnit = t.unit === selectedItem.unit;
+          const isEnt = (t.entreprise || 'NA') === (selectedItem.entreprise || 'NA');
+          const isCli = (t.client || 'NA') === (selectedItem.client || 'NA');
+          if (separateByYear && selectedItem.year && selectedItem.year !== '-') {
+            const info = lotArrivalMap.get(`${t.lot}_${t.product}_${t.unit}_${t.entreprise || 'NA'}_${t.client || 'NA'}`);
+            const bucketYear = info?.arrivalYear || t.date.split('-')[0];
+            return isProd && isUnit && isEnt && isCli && bucketYear === selectedItem.year;
+          }
+          return isProd && isUnit && isEnt && isCli;
+        });
+      }
+    }
+
+    return { inTxs: finalInTxs, outTxs: finalOutTxs, inventory: displayInv };
+  }, [processedTransactions, appliedFilters, filtersApplied, separateByYear, selectedStockKey]);
+
+  const displayedOutTxs = useMemo(() => {
+    if (selectedEntreeId) {
+      const allocs = fifoAllocation.inTxToOutTxsMap.get(selectedEntreeId) || [];
+      const outTxIds = new Set(allocs.map(a => a.outTxId));
+      return outTxs.filter(t => outTxIds.has(t.id));
+    } else {
+      return outTxs.filter(t => {
+        const allocs = fifoAllocation.outTxToInTxsMap.get(t.id) || [];
+        if (allocs.length === 0) return true;
+        return allocs.some(a => {
+          const avail = fifoAllocation.inTxAvailableMap.get(a.inTxId) ?? 0;
+          return avail > 0.001;
+        });
+      });
+    }
+  }, [outTxs, selectedEntreeId, fifoAllocation]);
 
   const formatNum = (num: number, decimals: number = 2) => {
     const safeNum = Math.abs(num) < 0.000001 ? 0 : num;
@@ -678,8 +835,33 @@ function App() {
       if (expiryStatus === 'red') rowStyle = "bg-red-50 dark:bg-red-900/20";
       if (expiryStatus === 'yellow') rowStyle = "bg-yellow-50 dark:bg-yellow-900/10";
 
+      // If it is an IN transaction, check if it's complete or has been taken from
+      const availableQty = isIncoming ? (fifoAllocation.inTxAvailableMap.get(tx.id) ?? tx.qty) : tx.qty;
+      const isComplete = isIncoming ? (Math.abs(availableQty - tx.qty) < 0.001) : true;
+      const isSelected = selectedEntreeId === tx.id;
+
+      // Click handler for row (only for IN transaction)
+      const handleRowClick = () => {
+        if (isIncoming) {
+          setSelectedEntreeId(prev => prev === tx.id ? null : tx.id);
+        }
+      };
+
+      let selectedClass = "";
+      if (isIncoming) {
+        if (isSelected) {
+          selectedClass = "bg-green-50/70 dark:bg-green-950/20 border-l-4 border-l-green-600 ring-1 ring-green-600/30 font-semibold";
+        } else {
+          selectedClass = "cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/40";
+        }
+      }
+
       return (
-        <tr key={tx.id} className={`${rowStyle} hover:bg-gray-100 dark:hover:bg-gray-700/50 border-b border-gray-100 dark:border-gray-800/60 group transition-colors`}>
+        <tr 
+          key={tx.id} 
+          onClick={handleRowClick}
+          className={`${rowStyle} ${selectedClass} hover:bg-gray-100 dark:hover:bg-gray-700/50 border-b border-gray-100 dark:border-gray-800/60 group transition-all duration-150`}
+        >
           <td className="py-1 px-2 text-gray-600 dark:text-gray-400 align-middle whitespace-nowrap">
             <div className="flex flex-col">
               <span>{formatDate(tx.date)}</span>
@@ -708,14 +890,32 @@ function App() {
              </div>
           </td>
           <td className="py-1 px-2 text-right align-middle">
-            <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty, 2)}</span>
-            <span className="text-[9px] text-gray-500 ml-1">{tx.unit}</span>
+            <div className="flex flex-col items-end">
+              <div>
+                <span className={`font-bold ${isIncoming ? 'text-green-600' : 'text-red-600'}`}>{formatNum(tx.qty, 2)}</span>
+                <span className="text-[9px] text-gray-500 ml-1">{tx.unit}</span>
+              </div>
+              {isIncoming && (
+                <div className="mt-0.5">
+                  {isComplete ? (
+                    <span className="text-[8px] bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300 font-black px-1.5 py-0.5 rounded uppercase tracking-wider">
+                      complet
+                    </span>
+                  ) : (
+                    <span className="text-[8px] bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 font-black px-1.5 py-0.5 rounded uppercase tracking-wider flex items-center gap-1">
+                      reste: {formatNum(availableQty, 2)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </td>
           {isIncoming && showValues && <td className="py-1 px-2 text-right font-semibold">{tx.valueDhs ? `${formatNum(tx.valueDhs, 3)}` : '-'}</td>}
           <td className="py-1 px-2 text-center w-14">
-            <div className="flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex items-center justify-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
               <button 
-                onClick={() => {
+                onClick={(e) => {
+                  e.stopPropagation();
                   const originalTx = transactions.find(t => t.id === tx.id) || tx;
                   openModal(tx.type, originalTx);
                 }} 
@@ -725,7 +925,10 @@ function App() {
                 ✎
               </button>
               <button 
-                onClick={() => handleDelete(tx.id)} 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDelete(tx.id);
+                }} 
                 className="text-gray-400 hover:text-red-600 p-1" 
                 title="Supprimer"
               >
@@ -811,17 +1014,38 @@ function App() {
                 value: existing.value + val 
               });
 
+              const itemKey = `${item.product}_${item.unit}_${item.entreprise || 'NA'}_${item.client || 'NA'}_${item.year || '-'}`;
+              const isSelected = selectedStockKey === itemKey;
+
               rows.push(
-                <tr key={`${entName}-${cliName}-${yearName}-${idx}`} className="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                <tr 
+                  key={`${entName}-${cliName}-${yearName}-${idx}`} 
+                  onClick={() => {
+                    setSelectedStockKey(prev => prev === itemKey ? null : itemKey);
+                    setShowHistoryUI(true);
+                  }}
+                  className={`border-b border-gray-100 dark:border-gray-800 cursor-pointer transition-all duration-200 ${
+                    isSelected 
+                      ? 'bg-blue-50/80 dark:bg-blue-900/40 text-blue-900 dark:text-blue-100 ring-2 ring-blue-500/30' 
+                      : 'hover:bg-gray-50 dark:hover:bg-gray-700/30'
+                  }`}
+                >
                   <td className="p-2 pl-6">
-                    <div className="font-bold text-gray-800 dark:text-gray-200 leading-tight">{item.product}</div>
-                    {item.ngp && item.ngp !== '-' && <div className="text-[9px] text-blue-500 font-bold uppercase">NGP: {item.ngp}</div>}
+                    <div className="flex items-center gap-1.5">
+                      {isSelected && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse flex-shrink-0" />
+                      )}
+                      <div className={`font-bold leading-tight ${isSelected ? 'text-blue-700 dark:text-blue-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                        {item.product}
+                      </div>
+                    </div>
+                    {item.ngp && item.ngp !== '-' && <div className="text-[9px] text-blue-500 font-bold uppercase pl-3">NGP: {item.ngp}</div>}
                   </td>
-                  <td className="p-2 text-right font-black text-blue-700 dark:text-blue-400">
+                  <td className={`p-2 text-right font-black ${isSelected ? 'text-blue-800 dark:text-blue-300' : 'text-blue-700 dark:text-blue-400'}`}>
                     {formatNum(item.availableQty, 2)} <span className="text-[9px] font-normal opacity-60">{item.unit}</span>
                   </td>
                   {showValues && (
-                    <td className="p-2 text-right font-bold text-gray-700 dark:text-gray-300">
+                    <td className={`p-2 text-right font-bold ${isSelected ? 'text-blue-800 dark:text-blue-300' : 'text-gray-700 dark:text-gray-300'}`}>
                       {formatNum(val, 3)}
                     </td>
                   )}
@@ -1053,9 +1277,18 @@ function App() {
           <>
             <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow border border-green-200 overflow-hidden relative transition-all duration-300">
               <div className={`bg-green-700 text-white p-2 text-xs font-bold flex justify-between items-center uppercase`}>
-                <span>ENTRÉES ({inTxs.length})</span>
+                <div className="flex items-center gap-1.5">
+                  <span>ENTRÉES ({inTxs.length})</span>
+                  <span className="text-[9px] text-green-200 font-normal lowercase normal-case italic">(cliquez pour filtrer sorties)</span>
+                </div>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" /></svg>
               </div>
+              {selectedProductInfo && (
+                <div className="bg-green-50 dark:bg-green-950/20 px-2 py-1.5 border-b border-green-100 dark:border-green-900/30 text-[10px] text-green-800 dark:text-green-300 flex items-center justify-between gap-1">
+                  <span className="font-bold truncate">Filtre: {selectedProductInfo.product} ({selectedProductInfo.client})</span>
+                  <button onClick={() => setSelectedStockKey(null)} className="text-[10px] font-black hover:text-red-500 bg-green-100 dark:bg-green-900/40 w-4 h-4 rounded-full flex items-center justify-center transition-colors">✕</button>
+                </div>
+              )}
               <div className="flex-1 overflow-auto custom-scrollbar">
                 <table className={`w-full text-left ${tableFontSize}`}>
                   <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-[10px] text-gray-500 z-10">
@@ -1067,15 +1300,36 @@ function App() {
             </div>
             <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow border border-red-200 overflow-hidden relative transition-all duration-300">
               <div className="bg-red-700 text-white p-2 text-xs font-bold flex justify-between items-center uppercase">
-                <span>SORTIES ({outTxs.length})</span>
+                <span>SORTIES ({displayedOutTxs.length})</span>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
               </div>
+              {selectedProductInfo && (
+                <div className="bg-red-50 dark:bg-red-950/20 px-2 py-1.5 border-b border-red-100 dark:border-red-900/30 text-[10px] text-red-800 dark:text-red-300 flex items-center justify-between gap-1">
+                  <span className="font-bold truncate">Filtre: {selectedProductInfo.product} ({selectedProductInfo.client})</span>
+                  <button onClick={() => setSelectedStockKey(null)} className="text-[10px] font-black hover:text-red-500 bg-red-100 dark:bg-red-900/40 w-4 h-4 rounded-full flex items-center justify-center transition-colors">✕</button>
+                </div>
+              )}
+              {selectedEntreeId && (() => {
+                const selectedEntree = transactions.find(t => t.id === selectedEntreeId);
+                const totalSorties = fifoAllocation.inTxToOutTxsMap.get(selectedEntreeId)?.reduce((sum, a) => sum + a.qtyAllocated, 0) || 0;
+                return selectedEntree ? (
+                  <div className="bg-amber-50 dark:bg-amber-950/20 px-2 py-1.5 border-b border-amber-100 dark:border-amber-900/30 text-[10px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-1">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
+                      <span className="font-bold truncate">Entrée du {formatDate(selectedEntree.date)} ({formatNum(selectedEntree.qty, 2)} {selectedEntree.unit})</span>
+                      <span className="bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 px-1.5 py-0.5 rounded font-black whitespace-nowrap text-[9px] uppercase tracking-wider">
+                        Total Sorties: {formatNum(totalSorties, 2)} {selectedEntree.unit}
+                      </span>
+                    </div>
+                    <button onClick={() => setSelectedEntreeId(null)} className="text-[10px] font-black hover:text-red-500 bg-amber-100 dark:bg-amber-900/40 w-4.5 h-4.5 rounded-full flex items-center justify-center transition-colors">✕</button>
+                  </div>
+                ) : null;
+              })()}
               <div className="flex-1 overflow-auto custom-scrollbar">
                 <table className={`w-full text-left ${tableFontSize}`}>
                   <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900 text-[10px] text-gray-500 z-10">
                     <tr><th className="p-2">Date</th><th className="p-2">Produit</th><th className="p-2 text-right">Qté</th><th className="p-2"></th></tr>
                   </thead>
-                  <tbody>{renderTxRows(outTxs, false)}</tbody>
+                  <tbody>{renderTxRows(displayedOutTxs, false)}</tbody>
                 </table>
               </div>
             </div>
