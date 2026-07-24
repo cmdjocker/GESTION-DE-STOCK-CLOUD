@@ -35,6 +35,7 @@ function App() {
   
   const [showValues, setShowValues] = useState(false);
   const [showHistoryUI, setShowHistoryUI] = useState(false); 
+  const [showSoldOutSorties, setShowSoldOutSorties] = useState(false);
   const [includeHistoryPdf, setIncludeHistoryPdf] = useState(false);
   const [separateByYear, setSeparateByYear] = useState(false);
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
@@ -598,6 +599,8 @@ function App() {
       const allocs = fifoAllocation.inTxToOutTxsMap.get(selectedEntreeId) || [];
       const outTxIds = new Set(allocs.map(a => a.outTxId));
       return outTxs.filter(t => outTxIds.has(t.id));
+    } else if (showSoldOutSorties) {
+      return outTxs;
     } else {
       return outTxs.filter(t => {
         const allocs = fifoAllocation.outTxToInTxsMap.get(t.id) || [];
@@ -608,7 +611,7 @@ function App() {
         });
       });
     }
-  }, [outTxs, selectedEntreeId, fifoAllocation]);
+  }, [outTxs, selectedEntreeId, fifoAllocation, showSoldOutSorties]);
 
   const formatNum = (num: number, decimals: number = 2) => {
     const safeNum = Math.abs(num) < 0.000001 ? 0 : num;
@@ -1285,6 +1288,12 @@ function App() {
                   <input type="checkbox" checked={showHistoryUI} onChange={e => setShowHistoryUI(e.target.checked)} className="rounded h-3 w-3" />
                   <span>Afficher Mouvements</span>
                 </label>
+                {showHistoryUI && (
+                  <label className="flex items-center space-x-1 text-[10px] font-bold text-gray-500 cursor-pointer">
+                    <input type="checkbox" checked={showSoldOutSorties} onChange={e => setShowSoldOutSorties(e.target.checked)} className="rounded h-3 w-3" />
+                    <span>Sorties soldées</span>
+                  </label>
+                )}
              </div>
           </div>
         </div>
@@ -1318,7 +1327,18 @@ function App() {
             </div>
             <div className="w-full lg:w-1/3 flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow border border-red-200 overflow-hidden relative transition-all duration-300">
               <div className="bg-red-700 text-white p-2 text-xs font-bold flex justify-between items-center uppercase">
-                <span>SORTIES ({displayedOutTxs.length})</span>
+                <div className="flex items-center gap-2">
+                  <span>SORTIES ({displayedOutTxs.length})</span>
+                  <label className="flex items-center gap-1 text-[10px] text-red-100 cursor-pointer font-normal normal-case italic bg-red-800/60 px-1.5 py-0.5 rounded hover:bg-red-800 transition-colors">
+                    <input 
+                      type="checkbox" 
+                      checked={showSoldOutSorties} 
+                      onChange={e => setShowSoldOutSorties(e.target.checked)} 
+                      className="rounded h-3 w-3 accent-red-900 cursor-pointer" 
+                    />
+                    <span>Afficher soldées</span>
+                  </label>
+                </div>
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>
               </div>
               {selectedProductInfo && (
