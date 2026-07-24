@@ -328,14 +328,32 @@ function App() {
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  const handleSaveTransaction = async (txData: Omit<Transaction, 'id'>) => {
+  const handleSaveTransaction = async (txData: Omit<Transaction, 'id'> | Omit<Transaction, 'id'>[]) => {
     try {
-      await saveTransaction(txData, editingTx?.id);
-      
-      const isEdit = !!editingTx;
-      const actionType = isEdit ? "MODIFICATION" : (txData.type === TransactionType.IN ? "AJOUT ENTRÉE" : "AJOUT SORTIE");
-      const details = `${isEdit ? "Modification" : "Ajout"} - Réf DUM: ${txData.lot || '-'} | Prod: ${txData.product} | Qty: ${txData.qty} ${txData.unit} | Client: ${txData.client || '-'}`;
-      await addAuditLog(actionType, details);
+      const items = Array.isArray(txData) ? txData : [txData];
+      if (items.length === 0) return;
+
+      if (editingTx) {
+        // First item updates the existing transaction
+        await saveTransaction(items[0], editingTx.id);
+        // Any additional items added during edit are saved as new transactions
+        for (let i = 1; i < items.length; i++) {
+          await saveTransaction(items[i]);
+        }
+        
+        const details = `Modification - Réf DUM: ${items[0].lot || '-'} | ${items.length} produit(s) | Client: ${items[0].client || '-'}`;
+        await addAuditLog("MODIFICATION", details);
+      } else {
+        // Save all transactions
+        for (const item of items) {
+          await saveTransaction(item);
+        }
+        
+        const actionType = items[0].type === TransactionType.IN ? "AJOUT ENTRÉE" : "AJOUT SORTIE";
+        const prodsSummary = items.map(i => `${i.product} (${i.qty} ${i.unit})`).join(', ');
+        const details = `Ajout Multi-Produits (${items.length}) - Réf DUM: ${items[0].lot || '-'} | Prods: ${prodsSummary} | Client: ${items[0].client || '-'}`;
+        await addAuditLog(actionType, details);
+      }
 
       setIsModalOpen(false);
       setEditingTx(null);
@@ -1361,7 +1379,7 @@ function App() {
         </span>
       </footer>
 
-      <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTx ? "MODIFIER" : "AJOUTER"}>
+      <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTx ? "MODIFIER" : "AJOUTER"} maxWidth="max-w-2xl">
         <EntryForm 
           key={editingTx?.id || 'new'}
           type={modalType}
