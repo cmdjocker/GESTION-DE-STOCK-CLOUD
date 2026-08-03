@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Transaction, TransactionType, UnitType } from '../types';
 import { 
   subscribeProducts, 
@@ -11,6 +11,7 @@ import {
 interface EntryFormProps {
   type: TransactionType;
   initialData?: Transaction;
+  existingTransactions?: Transaction[];
   onSubmit: (transaction: Omit<Transaction, 'id'> | Omit<Transaction, 'id'>[]) => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -27,7 +28,7 @@ interface ProductItemRow {
   valueDhs: number | '';
 }
 
-const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCancel, onDelete, isMasterAdmin = false }) => {
+const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransactions = [], onSubmit, onCancel, onDelete, isMasterAdmin = false }) => {
   const [products, setProducts] = useState<string[]>([]);
   const [entreprisesList, setEntreprisesList] = useState<string[]>([]);
   const [clientsList, setClientsList] = useState<string[]>([]);
@@ -68,6 +69,57 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
       valueDhs: ''
     }];
   });
+
+  const dumStatus = useMemo(() => {
+    if (type !== TransactionType.OUT || !lot.trim() || !existingTransactions || existingTransactions.length === 0) {
+      return {
+        isExistingIn: false,
+        isSoldOut: false,
+        totalInQty: 0,
+        totalOutQty: 0,
+        availableQty: 0,
+        productBalances: new Map<string, { inQty: number; outQty: number; availableQty: number; isSoldOut: boolean }>()
+      };
+    }
+
+    const trimmedLot = lot.trim().toUpperCase();
+    const currentEditingId = initialData?.id;
+
+    const inTxs = existingTransactions.filter(t => t.type === TransactionType.IN && (t.lot || '').trim().toUpperCase() === trimmedLot);
+    const outTxs = existingTransactions.filter(t => t.type === TransactionType.OUT && (t.lot || '').trim().toUpperCase() === trimmedLot && t.id !== currentEditingId);
+
+    const isExistingIn = inTxs.length > 0;
+    const totalInQty = inTxs.reduce((sum, t) => sum + t.qty, 0);
+    const totalOutQty = outTxs.reduce((sum, t) => sum + t.qty, 0);
+    const availableQty = Math.max(0, totalInQty - totalOutQty);
+
+    const isSoldOut = isExistingIn && availableQty <= 0.0001;
+
+    const productBalances = new Map<string, { inQty: number; outQty: number; availableQty: number; isSoldOut: boolean }>();
+    const lotProducts = new Set<string>();
+    inTxs.forEach(t => lotProducts.add(t.product));
+
+    lotProducts.forEach(prodName => {
+      const pIn = inTxs.filter(t => t.product === prodName).reduce((sum, t) => sum + t.qty, 0);
+      const pOut = outTxs.filter(t => t.product === prodName).reduce((sum, t) => sum + t.qty, 0);
+      const pAvail = Math.max(0, pIn - pOut);
+      productBalances.set(prodName, {
+        inQty: pIn,
+        outQty: pOut,
+        availableQty: pAvail,
+        isSoldOut: pIn > 0 && pAvail <= 0.0001
+      });
+    });
+
+    return {
+      isExistingIn,
+      isSoldOut,
+      totalInQty,
+      totalOutQty,
+      availableQty,
+      productBalances
+    };
+  }, [type, lot, existingTransactions, initialData]);
 
   useEffect(() => {
     const unsubProd = subscribeProducts(setProducts);
@@ -121,6 +173,31 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
     if (productItems.length === 0) {
       alert('Veuillez ajouter au moins un produit.');
       return;
+    }
+
+    // Check sold-out status for sorties
+    if (type === TransactionType.OUT) {
+      const trimmedLot = lot.trim().toUpperCase();
+      if (dumStatus.isSoldOut) {
+        alert(`ACCÈS REFUSÉ :\n\nLa référence DUM "${trimmedLot}" est déjà totalement SOLDÉE (Stock épuisé : 0).\n\nVous ne pouvez pas enregistrer une nouvelle sortie pour un DUM déjà vide/soldé.`);
+        return;
+      }
+
+      for (let i = 0; i < productItems.length; i++) {
+        const item = productItems[i];
+        const finalProd = item.isNewProduct ? item.newProductName.trim().toUpperCase() : item.product;
+        const pBal = dumStatus.productBalances.get(finalProd);
+
+        if (pBal && pBal.isSoldOut) {
+          alert(`ACCÈS REFUSÉ :\n\nLe produit "${finalProd}" pour le DUM "${trimmedLot}" est déjà totalement SOLDÉ (Stock dispo : 0).`);
+          return;
+        }
+
+        if (pBal && item.qty !== '' && Number(item.qty) > pBal.availableQty) {
+          alert(`ACCÈS REFUSÉ :\n\nLa quantité saisie (${item.qty}) dépasse le stock disponible (${pBal.availableQty} ${item.unit}) pour le produit "${finalProd}" dans le DUM "${trimmedLot}".`);
+          return;
+        }
+      }
     }
 
     // Validate items
@@ -252,13 +329,43 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
         <div className="flex gap-3">
           <div className="flex-1">
             <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">{type === TransactionType.OUT ? 'DUM ENTRÉE Réf' : 'DUM Réf'}</label>
-            <input type="text" required value={lot} onChange={(e) => setLot(e.target.value)} className={`${inputClass} uppercase font-mono font-bold text-blue-700 dark:text-blue-300`} placeholder="Ex: 12345/2024" />
+            <input 
+              type="text" 
+              required 
+              value={lot} 
+              onChange={(e) => setLot(e.target.value)} 
+              className={`${inputClass} uppercase font-mono font-bold ${
+                type === TransactionType.OUT && dumStatus.isSoldOut 
+                  ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 ring-2 ring-red-500' 
+                  : 'text-blue-700 dark:text-blue-300'
+              }`} 
+              placeholder="Ex: 12345/2024" 
+            />
           </div>
           <div className="flex-1">
             <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">NGP</label>
             <input type="text" value={ngp} onChange={(e) => setNgp(e.target.value)} className={inputClass} placeholder="Ex: 0303441000" />
           </div>
         </div>
+
+        {/* SOLD OUT ALERT BANNER */}
+        {type === TransactionType.OUT && lot.trim().length > 0 && dumStatus.isSoldOut && (
+          <div className="bg-red-100 dark:bg-red-950/90 border-2 border-red-600 dark:border-red-500 rounded-lg p-3 text-red-900 dark:text-red-100 flex items-start gap-2.5 shadow-md animate-pulse">
+            <div className="text-xl leading-none">⛔</div>
+            <div className="text-xs space-y-1">
+              <div className="font-extrabold uppercase text-red-700 dark:text-red-300 tracking-wide text-[11px]">
+                DUM Réf. "{lot.trim().toUpperCase()}" EST TOTALEMENT SOLDÉ !
+              </div>
+              <div className="font-medium text-[11px] leading-relaxed">
+                Ce DUM a été enregistré en entrée ({dumStatus.totalInQty} au total) mais son stock est actuellement <strong className="underline">entièrement épuisé (Reste: 0)</strong>.
+                <br />
+                <span className="font-extrabold text-red-800 dark:text-red-200">
+                  ❌ Impossible de saisir une nouvelle sortie sur un DUM déjà soldé/vide.
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* MULTI PRODUCTS SECTION */}
@@ -326,6 +433,43 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, onSubmit, onCa
                     <option value="NEW" className="font-bold text-blue-600 text-xs">+ Ajouter un nouveau produit</option>
                   </select>
                 )}
+
+                {/* Product Stock Info for Sorties */}
+                {type === TransactionType.OUT && lot.trim().length > 0 && (() => {
+                  const finalProd = item.isNewProduct ? item.newProductName.trim().toUpperCase() : item.product;
+                  if (!finalProd) return null;
+                  const pBal = dumStatus.productBalances.get(finalProd);
+
+                  if (dumStatus.isExistingIn && !pBal) {
+                    return (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400 font-medium mt-1">
+                        ⚠️ Note : Ce produit n'est pas répertorié dans l'entrée du DUM "{lot.trim().toUpperCase()}".
+                      </div>
+                    );
+                  }
+
+                  if (pBal) {
+                    if (pBal.isSoldOut && !dumStatus.isSoldOut) {
+                      return (
+                        <div className="bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-700 p-1.5 rounded text-[10px] font-bold text-red-700 dark:text-red-300 mt-1 flex items-center gap-1">
+                          <span>⛔</span> Produit "{finalProd}" est totalement SOLDÉ pour ce DUM (Stock dispo : 0).
+                        </div>
+                      );
+                    } else if (pBal.availableQty > 0) {
+                      const isExceeded = item.qty !== '' && Number(item.qty) > pBal.availableQty;
+                      return (
+                        <div className={`text-[10px] font-semibold mt-1 flex items-center gap-1 ${isExceeded ? 'text-red-600 dark:text-red-400 font-bold' : 'text-green-700 dark:text-green-400'}`}>
+                          <span>{isExceeded ? '⚠️' : '📦'}</span>
+                          {isExceeded 
+                            ? `Quantité (${item.qty}) dépasse le dispo (${pBal.availableQty} ${item.unit}) !`
+                            : `Stock dispo sur ce DUM : ${pBal.availableQty} ${item.unit}`
+                          }
+                        </div>
+                      );
+                    }
+                  }
+                  return null;
+                })()}
               </div>
 
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2 pt-1">

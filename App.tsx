@@ -1404,6 +1404,7 @@ function App() {
           key={editingTx?.id || 'new'}
           type={modalType}
           initialData={editingTx || undefined}
+          existingTransactions={transactions}
           onSubmit={handleSaveTransaction}
           onCancel={closeModal}
           onDelete={editingTx ? () => handleDelete(editingTx.id) : undefined}
