@@ -28,6 +28,21 @@ interface ProductItemRow {
   valueDhs: number | '';
 }
 
+const roundVal = (val: number, maxDecimals: number = 3): number => {
+  if (Math.abs(val) < 0.0001) return 0;
+  const factor = Math.pow(10, maxDecimals);
+  return Math.round((val + Number.EPSILON) * factor) / factor;
+};
+
+const formatQty = (val: number): string => {
+  const rounded = roundVal(val, 3);
+  if (Math.abs(rounded) < 0.0001) return '0';
+  return rounded.toLocaleString('fr-FR', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2
+  });
+};
+
 const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransactions = [], onSubmit, onCancel, onDelete, isMasterAdmin = false }) => {
   const [products, setProducts] = useState<string[]>([]);
   const [entreprisesList, setEntreprisesList] = useState<string[]>([]);
@@ -78,7 +93,11 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
         totalInQty: 0,
         totalOutQty: 0,
         availableQty: 0,
-        productBalances: new Map<string, { inQty: number; outQty: number; availableQty: number; isSoldOut: boolean }>()
+        productBalances: new Map<string, { inQty: number; outQty: number; availableQty: number; unit: UnitType; isSoldOut: boolean }>(),
+        entrepriseMismatch: false,
+        clientMismatch: false,
+        expectedEntreprise: '',
+        expectedClient: ''
       };
     }
 
@@ -89,24 +108,40 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
     const outTxs = existingTransactions.filter(t => t.type === TransactionType.OUT && (t.lot || '').trim().toUpperCase() === trimmedLot && t.id !== currentEditingId);
 
     const isExistingIn = inTxs.length > 0;
-    const totalInQty = inTxs.reduce((sum, t) => sum + t.qty, 0);
-    const totalOutQty = outTxs.reduce((sum, t) => sum + t.qty, 0);
-    const availableQty = Math.max(0, totalInQty - totalOutQty);
+    const totalInQty = roundVal(inTxs.reduce((sum, t) => sum + t.qty, 0), 3);
+    const totalOutQty = roundVal(outTxs.reduce((sum, t) => sum + t.qty, 0), 3);
+    const rawAvail = totalInQty - totalOutQty;
+    const availableQty = rawAvail <= 0.0001 ? 0 : roundVal(rawAvail, 3);
 
     const isSoldOut = isExistingIn && availableQty <= 0.0001;
 
-    const productBalances = new Map<string, { inQty: number; outQty: number; availableQty: number; isSoldOut: boolean }>();
+    // Check Entreprise and Client Mismatch for existing DUM
+    const expectedEntreprise = inTxs.find(t => t.entreprise?.trim())?.entreprise?.trim() || '';
+    const expectedClient = inTxs.find(t => t.client?.trim())?.client?.trim() || '';
+
+    const currentEntreprise = (isNewEntreprise ? newEntrepriseName : entreprise).trim().toUpperCase();
+    const currentClient = (isNewClient ? newClientName : client).trim().toUpperCase();
+
+    const entrepriseMismatch = isExistingIn && !!expectedEntreprise && !!currentEntreprise && (currentEntreprise !== expectedEntreprise.toUpperCase());
+    const clientMismatch = isExistingIn && !!expectedClient && !!currentClient && (currentClient !== expectedClient.toUpperCase());
+
+    const productBalances = new Map<string, { inQty: number; outQty: number; availableQty: number; unit: UnitType; isSoldOut: boolean }>();
     const lotProducts = new Set<string>();
     inTxs.forEach(t => lotProducts.add(t.product));
 
     lotProducts.forEach(prodName => {
-      const pIn = inTxs.filter(t => t.product === prodName).reduce((sum, t) => sum + t.qty, 0);
-      const pOut = outTxs.filter(t => t.product === prodName).reduce((sum, t) => sum + t.qty, 0);
-      const pAvail = Math.max(0, pIn - pOut);
+      const pInTxs = inTxs.filter(t => t.product === prodName);
+      const pUnit = pInTxs[0]?.unit || UnitType.KG;
+      const pIn = roundVal(pInTxs.reduce((sum, t) => sum + t.qty, 0), 3);
+      const pOut = roundVal(outTxs.filter(t => t.product === prodName).reduce((sum, t) => sum + t.qty, 0), 3);
+      const pRawAvail = pIn - pOut;
+      const pAvail = pRawAvail <= 0.0001 ? 0 : roundVal(pRawAvail, 3);
+
       productBalances.set(prodName, {
         inQty: pIn,
         outQty: pOut,
         availableQty: pAvail,
+        unit: pUnit,
         isSoldOut: pIn > 0 && pAvail <= 0.0001
       });
     });
@@ -117,9 +152,36 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
       totalInQty,
       totalOutQty,
       availableQty,
-      productBalances
+      productBalances,
+      entrepriseMismatch,
+      clientMismatch,
+      expectedEntreprise,
+      expectedClient
     };
-  }, [type, lot, existingTransactions, initialData]);
+  }, [type, lot, entreprise, client, isNewEntreprise, newEntrepriseName, isNewClient, newClientName, existingTransactions, initialData]);
+
+  // Auto-fill entreprise, client, ngp on Sorties when a DUM Réf is entered
+  useEffect(() => {
+    if (type === TransactionType.OUT && lot.trim().length > 0 && !initialData) {
+      const trimmedLot = lot.trim().toUpperCase();
+      const inTxs = existingTransactions.filter(t => t.type === TransactionType.IN && (t.lot || '').trim().toUpperCase() === trimmedLot);
+      if (inTxs.length > 0) {
+        const expEnt = inTxs.find(t => t.entreprise?.trim())?.entreprise?.trim() || '';
+        const expCli = inTxs.find(t => t.client?.trim())?.client?.trim() || '';
+        const expNgp = inTxs.find(t => t.ngp?.trim())?.ngp?.trim() || '';
+
+        if (!entreprise && expEnt) {
+          setEntreprise(expEnt);
+        }
+        if (!client && expCli) {
+          setClient(expCli);
+        }
+        if (!ngp && expNgp) {
+          setNgp(expNgp);
+        }
+      }
+    }
+  }, [lot, type, existingTransactions, initialData]);
 
   useEffect(() => {
     const unsubProd = subscribeProducts(setProducts);
@@ -157,6 +219,30 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
     setProductItems(prev => prev.map(item => item.id === id ? { ...item, ...updates } : item));
   };
 
+  const handleImportAllDumProducts = () => {
+    if (!dumStatus.productBalances || dumStatus.productBalances.size === 0) return;
+    const rows: ProductItemRow[] = [];
+    dumStatus.productBalances.forEach((bal, prodName) => {
+      if (bal.availableQty > 0) {
+        rows.push({
+          id: Date.now().toString() + Math.random().toString(36).substring(2, 5),
+          product: prodName,
+          isNewProduct: false,
+          newProductName: '',
+          unit: bal.unit,
+          qty: bal.availableQty,
+          valueDhs: ''
+        });
+      }
+    });
+
+    if (rows.length > 0) {
+      setProductItems(rows);
+    } else {
+      alert("Aucun produit disponible à importer pour ce DUM.");
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -175,11 +261,25 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
       return;
     }
 
-    // Check sold-out status for sorties
+    const finalEntreprise = isNewEntreprise ? newEntrepriseName.trim().toUpperCase() : entreprise;
+    const finalClient = isNewClient ? newClientName.trim().toUpperCase() : client;
+
+    // Check sold-out status & Entreprise / Client Mismatch for sorties
     if (type === TransactionType.OUT) {
       const trimmedLot = lot.trim().toUpperCase();
+      
       if (dumStatus.isSoldOut) {
         alert(`ACCÈS REFUSÉ :\n\nLa référence DUM "${trimmedLot}" est déjà totalement SOLDÉE (Stock épuisé : 0).\n\nVous ne pouvez pas enregistrer une nouvelle sortie pour un DUM déjà vide/soldé.`);
+        return;
+      }
+
+      if (dumStatus.entrepriseMismatch) {
+        alert(`ACCÈS REFUSÉ :\n\nLa référence DUM "${trimmedLot}" est enregistrée sous l'entreprise "${dumStatus.expectedEntreprise}", mais vous avez sélectionné "${finalEntreprise}".\n\nVeuillez sélectionner la bonne entreprise pour ce DUM.`);
+        return;
+      }
+
+      if (dumStatus.clientMismatch) {
+        alert(`ACCÈS REFUSÉ :\n\nLa référence DUM "${trimmedLot}" est enregistrée sous le client "${dumStatus.expectedClient}", mais vous avez sélectionné "${finalClient}".\n\nVeuillez sélectionner le bon client pour ce DUM.`);
         return;
       }
 
@@ -194,7 +294,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
         }
 
         if (pBal && item.qty !== '' && Number(item.qty) > pBal.availableQty) {
-          alert(`ACCÈS REFUSÉ :\n\nLa quantité saisie (${item.qty}) dépasse le stock disponible (${pBal.availableQty} ${item.unit}) pour le produit "${finalProd}" dans le DUM "${trimmedLot}".`);
+          alert(`ACCÈS REFUSÉ :\n\nLa quantité saisie (${formatQty(Number(item.qty))}) dépasse le stock disponible (${formatQty(pBal.availableQty)} ${item.unit}) pour le produit "${finalProd}" dans le DUM "${trimmedLot}".`);
           return;
         }
       }
@@ -213,9 +313,6 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
         return;
       }
     }
-
-    const finalEntreprise = isNewEntreprise ? newEntrepriseName.trim().toUpperCase() : entreprise;
-    const finalClient = isNewClient ? newClientName.trim().toUpperCase() : client;
 
     if (isNewEntreprise && finalEntreprise) {
       await addToList("entreprises", finalEntreprise);
@@ -248,76 +345,121 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
         qty: Number(item.qty),
       };
 
-      if (type === TransactionType.IN && expiryDate) {
-        payload.expiryDate = expiryDate;
-      }
-      
-      if (finalEntreprise) {
-        payload.entreprise = finalEntreprise;
-      }
-      
-      if (finalClient) {
-        payload.client = finalClient;
-      }
-      
+      if (finalEntreprise) payload.entreprise = finalEntreprise;
+      if (finalClient) payload.client = finalClient;
+      if (expiryDate) payload.expiryDate = expiryDate;
       if (type === TransactionType.IN && item.valueDhs !== '') {
         payload.valueDhs = Number(item.valueDhs);
       }
 
-      payloads.push(payload as Omit<Transaction, 'id'>);
+      payloads.push(payload);
     }
 
-    onSubmit(payloads.length === 1 ? payloads[0] : payloads);
+    if (payloads.length === 1) {
+      onSubmit(payloads[0]);
+    } else {
+      onSubmit(payloads);
+    }
   };
 
-  const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded-md p-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-blue-500 transition-all text-xs";
+  const inputClass = "w-full border border-gray-300 dark:border-gray-600 rounded p-1.5 bg-white dark:bg-gray-700 text-xs outline-none focus:ring-1 focus:ring-blue-500 font-medium text-gray-900 dark:text-gray-100";
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4 text-left">
-      {/* HEADER INFO (DUM & Document metadata) */}
-      <div className="bg-gray-50 dark:bg-gray-800/60 p-3 rounded-lg border border-gray-200 dark:border-gray-700 space-y-3">
-        <div className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5 border-b pb-1 border-gray-200 dark:border-gray-700">
-          <span>📋</span> Information Document & DUM
+    <form onSubmit={handleSubmit} className="space-y-4 max-h-[85vh] overflow-y-auto custom-scrollbar pr-1">
+      {/* HEADER BAR */}
+      <div className={`p-3 rounded-lg text-white font-bold flex justify-between items-center shadow-sm ${type === TransactionType.IN ? 'bg-green-700 dark:bg-green-800' : 'bg-red-700 dark:bg-red-800'}`}>
+        <div className="flex items-center gap-2">
+          <span className="text-lg">{type === TransactionType.IN ? '📥' : '📤'}</span>
+          <div>
+            <h3 className="text-sm uppercase tracking-wide">
+              {initialData ? 'Modifier Saisie' : (type === TransactionType.IN ? 'Saisie Entrée (Réception)' : 'Saisie Sortie (Expédition)')}
+            </h3>
+            <p className="text-[10px] text-gray-200 font-normal">
+              {productItems.length > 1 ? `${productItems.length} produits dans cette saisie` : 'Remplissez les détails ci-dessous'}
+            </p>
+          </div>
         </div>
+      </div>
 
-        <div className="flex gap-3">
-          <div className="flex-1">
-            <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Date d'opération</label>
+      {/* GENERAL TRANSACTION INFO */}
+      <div className="bg-gray-50 dark:bg-gray-750 p-3 rounded-lg border border-gray-200 dark:border-gray-700 space-y-3">
+        <div className={`grid ${type === TransactionType.IN ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
+          <div>
+            <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Date Opération</label>
             <input ref={dateInputRef} type="date" required value={date} onChange={(e) => setDate(e.target.value)} className={inputClass} />
           </div>
           {type === TransactionType.IN && (
-            <div className="flex-1">
-              <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Echéance max</label>
+            <div>
+              <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">
+                Date Limite/Péremption <span className="text-[10px] font-normal text-gray-400">(Facultatif)</span>
+              </label>
               <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputClass} />
             </div>
           )}
         </div>
 
-        <div className="flex gap-3">
-          <div className="flex-1">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
             <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Entreprise</label>
             {isNewEntreprise ? (
               <div className="relative">
-                <input type="text" value={newEntrepriseName} onChange={(e) => setNewEntrepriseName(e.target.value)} className={inputClass} autoFocus placeholder="Nom entreprise..." />
-                <button type="button" onClick={() => setIsNewEntreprise(false)} className="absolute right-2 top-2 text-[10px] text-red-500 font-bold">Annuler</button>
+                <input
+                  type="text"
+                  required
+                  value={newEntrepriseName}
+                  onChange={(e) => setNewEntrepriseName(e.target.value)}
+                  className={inputClass}
+                  placeholder="Nom de l'entreprise..."
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => { setIsNewEntreprise(false); setNewEntrepriseName(''); }}
+                  className="absolute right-2 top-2 text-[10px] text-red-500 font-bold"
+                >
+                  Annuler
+                </button>
               </div>
             ) : (
-              <select value={entreprise} onChange={(e) => e.target.value === 'NEW' ? setIsNewEntreprise(true) : setEntreprise(e.target.value)} className={inputClass}>
+              <select 
+                value={entreprise} 
+                onChange={(e) => e.target.value === 'NEW' ? setIsNewEntreprise(true) : setEntreprise(e.target.value)} 
+                className={`${inputClass} ${dumStatus.entrepriseMismatch ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 ring-2 ring-red-500' : ''}`}
+              >
                 <option value="">-- Aucune --</option>
                 {entreprisesList.map(ent => <option key={ent} value={ent}>{ent}</option>)}
                 <option value="NEW" className="font-bold text-blue-600 text-xs">+ Ajouter entreprise</option>
               </select>
             )}
           </div>
-          <div className="flex-1">
-            <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Client</label>
+
+          <div>
+            <label className="block text-xs font-semibold mb-1 text-gray-700 dark:text-gray-300">Client / Destinataire</label>
             {isNewClient ? (
               <div className="relative">
-                <input type="text" value={newClientName} onChange={(e) => setNewClientName(e.target.value)} className={inputClass} autoFocus placeholder="Nom client..." />
-                <button type="button" onClick={() => setIsNewClient(false)} className="absolute right-2 top-2 text-[10px] text-red-500 font-bold">Annuler</button>
+                <input
+                  type="text"
+                  required
+                  value={newClientName}
+                  onChange={(e) => setNewClientName(e.target.value)}
+                  className={inputClass}
+                  placeholder="Nom du client..."
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => { setIsNewClient(false); setNewClientName(''); }}
+                  className="absolute right-2 top-2 text-[10px] text-red-500 font-bold"
+                >
+                  Annuler
+                </button>
               </div>
             ) : (
-              <select value={client} onChange={(e) => e.target.value === 'NEW' ? setIsNewClient(true) : setClient(e.target.value)} className={inputClass}>
+              <select 
+                value={client} 
+                onChange={(e) => e.target.value === 'NEW' ? setIsNewClient(true) : setClient(e.target.value)} 
+                className={`${inputClass} ${dumStatus.clientMismatch ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 ring-2 ring-red-500' : ''}`}
+              >
                 <option value="">-- Aucun --</option>
                 {clientsList.map(cli => <option key={cli} value={cli}>{cli}</option>)}
                 <option value="NEW" className="font-bold text-blue-600 text-xs">+ Ajouter client</option>
@@ -335,7 +477,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
               value={lot} 
               onChange={(e) => setLot(e.target.value)} 
               className={`${inputClass} uppercase font-mono font-bold ${
-                type === TransactionType.OUT && dumStatus.isSoldOut 
+                type === TransactionType.OUT && (dumStatus.isSoldOut || dumStatus.entrepriseMismatch || dumStatus.clientMismatch)
                   ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 ring-2 ring-red-500' 
                   : 'text-blue-700 dark:text-blue-300'
               }`} 
@@ -348,8 +490,29 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
           </div>
         </div>
 
+        {/* ENTREPRISE / CLIENT MISMATCH BANNER */}
+        {type === TransactionType.OUT && lot.trim().length > 0 && (dumStatus.entrepriseMismatch || dumStatus.clientMismatch) && (
+          <div className="bg-red-100 dark:bg-red-950/90 border-2 border-red-600 dark:border-red-500 rounded-lg p-3 text-red-900 dark:text-red-100 flex items-start gap-2.5 shadow-md">
+            <div className="text-xl leading-none">⚠️</div>
+            <div className="text-xs space-y-1">
+              <div className="font-extrabold uppercase text-red-800 dark:text-red-200 tracking-wide text-[11px]">
+                INCOMPATIBILITÉ DUM / ENTREPRISE / CLIENT !
+              </div>
+              <div className="font-medium text-[11px] leading-relaxed">
+                Ce DUM <strong>"{lot.trim().toUpperCase()}"</strong> a été enregistré initialement en Entrée pour :
+                {dumStatus.expectedEntreprise && <span className="block mt-0.5">• Entreprise : <strong className="underline text-red-900 dark:text-red-100">{dumStatus.expectedEntreprise}</strong></span>}
+                {dumStatus.expectedClient && <span className="block mt-0.5">• Client : <strong className="underline text-red-900 dark:text-red-100">{dumStatus.expectedClient}</strong></span>}
+                <br />
+                <span className="font-extrabold text-red-800 dark:text-red-200">
+                  ❌ Impossible de faire une sortie sur ce DUM sous une Entreprise ou un Client différent.
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* SOLD OUT ALERT BANNER */}
-        {type === TransactionType.OUT && lot.trim().length > 0 && dumStatus.isSoldOut && (
+        {type === TransactionType.OUT && lot.trim().length > 0 && dumStatus.isSoldOut && !dumStatus.entrepriseMismatch && !dumStatus.clientMismatch && (
           <div className="bg-red-100 dark:bg-red-950/90 border-2 border-red-600 dark:border-red-500 rounded-lg p-3 text-red-900 dark:text-red-100 flex items-start gap-2.5 shadow-md animate-pulse">
             <div className="text-xl leading-none">⛔</div>
             <div className="text-xs space-y-1">
@@ -357,7 +520,7 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
                 DUM Réf. "{lot.trim().toUpperCase()}" EST TOTALEMENT SOLDÉ !
               </div>
               <div className="font-medium text-[11px] leading-relaxed">
-                Ce DUM a été enregistré en entrée ({dumStatus.totalInQty} au total) mais son stock est actuellement <strong className="underline">entièrement épuisé (Reste: 0)</strong>.
+                Ce DUM a été enregistré en entrée ({formatQty(dumStatus.totalInQty)} au total) mais son stock est actuellement <strong className="underline">entièrement épuisé (Reste: 0)</strong>.
                 <br />
                 <span className="font-extrabold text-red-800 dark:text-red-200">
                   ❌ Impossible de saisir une nouvelle sortie sur un DUM déjà soldé/vide.
@@ -380,6 +543,17 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
             </span>
           )}
         </div>
+
+        {/* BULK IMPORT BUTTON FOR SORTIES */}
+        {type === TransactionType.OUT && lot.trim().length > 0 && dumStatus.productBalances.size > 0 && !dumStatus.isSoldOut && (
+          <button
+            type="button"
+            onClick={handleImportAllDumProducts}
+            className="w-full py-2 bg-emerald-50 dark:bg-emerald-950/40 border-2 border-emerald-500/60 rounded-lg text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm"
+          >
+            <span>⚡</span> Charger tous les produits disponibles de ce DUM ({Array.from(dumStatus.productBalances.values()).filter(p => !p.isSoldOut).length} en stock)
+          </button>
+        )}
 
         <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1 custom-scrollbar">
           {productItems.map((item, index) => (
@@ -461,8 +635,8 @@ const EntryForm: React.FC<EntryFormProps> = ({ type, initialData, existingTransa
                         <div className={`text-[10px] font-semibold mt-1 flex items-center gap-1 ${isExceeded ? 'text-red-600 dark:text-red-400 font-bold' : 'text-green-700 dark:text-green-400'}`}>
                           <span>{isExceeded ? '⚠️' : '📦'}</span>
                           {isExceeded 
-                            ? `Quantité (${item.qty}) dépasse le dispo (${pBal.availableQty} ${item.unit}) !`
-                            : `Stock dispo sur ce DUM : ${pBal.availableQty} ${item.unit}`
+                            ? `Quantité (${item.qty}) dépasse le dispo (${formatQty(pBal.availableQty)} ${item.unit}) !`
+                            : `Stock dispo sur ce DUM : ${formatQty(pBal.availableQty)} ${item.unit}`
                           }
                         </div>
                       );
