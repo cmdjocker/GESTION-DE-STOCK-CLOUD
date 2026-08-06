@@ -258,3 +258,83 @@ export const disconnectUserSession = async (sessionId: string) => {
     console.error("Erreur disconnectUserSession: ", error);
   }
 };
+
+// --- Complete Data Backup & Restoration ---
+export const exportAllAppData = async () => {
+  const pathTxs = "transactions";
+  const pathProds = "products";
+  const pathEnts = "entreprises";
+  const pathClis = "clients";
+
+  try {
+    const [txsSnap, prodsSnap, entsSnap, clisSnap] = await Promise.all([
+      getDocs(collection(db, pathTxs)),
+      getDocs(collection(db, pathProds)),
+      getDocs(collection(db, pathEnts)),
+      getDocs(collection(db, pathClis))
+    ]);
+
+    return {
+      version: "1.0",
+      createdAt: new Date().toISOString(),
+      transactions: txsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+      products: prodsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+      entreprises: entsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+      clients: clisSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, "all_collections");
+    throw error;
+  }
+};
+
+export const restoreAppData = async (data: {
+  transactions?: any[];
+  products?: any[];
+  entreprises?: any[];
+  clients?: any[];
+}) => {
+  try {
+    if (data.products && Array.isArray(data.products)) {
+      for (const item of data.products) {
+        const name = item.name || item;
+        if (typeof name === 'string' && name.trim()) {
+          await addToList("products", name);
+        }
+      }
+    }
+
+    if (data.entreprises && Array.isArray(data.entreprises)) {
+      for (const item of data.entreprises) {
+        const name = item.name || item;
+        if (typeof name === 'string' && name.trim()) {
+          await addToList("entreprises", name);
+        }
+      }
+    }
+
+    if (data.clients && Array.isArray(data.clients)) {
+      for (const item of data.clients) {
+        const name = item.name || item;
+        if (typeof name === 'string' && name.trim()) {
+          await addToList("clients", name);
+        }
+      }
+    }
+
+    if (data.transactions && Array.isArray(data.transactions)) {
+      for (const tx of data.transactions) {
+        if (!tx || typeof tx !== 'object') continue;
+        const { id, ...txData } = tx;
+        if (!txData.date || !txData.product || !txData.type) continue;
+        await saveTransaction(txData, id);
+      }
+    }
+
+    await addAuditLog("RESTAURATION_DONNEES", "Restauration point de données effectuée avec succès.");
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, "restoration");
+    throw error;
+  }
+};
+

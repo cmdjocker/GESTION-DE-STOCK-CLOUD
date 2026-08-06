@@ -12,7 +12,9 @@ import {
   subscribeAuditLogs,
   registerUserSession,
   subscribeActiveSessions,
-  disconnectUserSession
+  disconnectUserSession,
+  exportAllAppData,
+  restoreAppData
 } from './services/storageService';
 import { auth } from './services/firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, User, signOut } from 'firebase/auth';
@@ -52,6 +54,11 @@ function App() {
   const [sessionSuccessMessage, setSessionSuccessMessage] = useState('');
   const [selectedStockKey, setSelectedStockKey] = useState<string | null>(null);
   const [selectedEntreeId, setSelectedEntreeId] = useState<string | null>(null);
+
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
+  const [restoreSecurityCode, setRestoreSecurityCode] = useState("");
 
   useEffect(() => {
     setSelectedEntreeId(null);
@@ -767,6 +774,67 @@ function App() {
     link.click();
   };
 
+  const handleDownloadBackup = async () => {
+    try {
+      setBackupLoading(true);
+      setRestoreStatus("Génération du fichier de sauvegarde...");
+      const data = await exportAllAppData();
+      const jsonStr = JSON.stringify(data, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const dateStr = new Date().toISOString().split('T')[0];
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `POINT_DE_RESTAURATION_STOCK_${dateStr}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setRestoreStatus("✅ Point de restauration téléchargé avec succès ! Conservez ce fichier en sécurité.");
+    } catch (err: any) {
+      console.error("Backup failed", err);
+      setRestoreStatus("❌ Erreur lors de la sauvegarde : " + (err.message || String(err)));
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleRestoreFromFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    let code = restoreSecurityCode.trim();
+    if (!code) {
+      const promptedCode = window.prompt("🔒 CODE DE SÉCURITÉ MASTER ADMIN REQUIS :\nVeuillez saisir le code de sécurité master admin pour valider la restauration :");
+      code = (promptedCode || "").trim();
+    }
+
+    if (code !== "2026") {
+      setRestoreStatus("❌ Code de sécurité Master Admin incorrect (2026 requis). Restauration refusée.");
+      alert("Code de sécurité Master Admin incorrect. Restauration annulée.");
+      event.target.value = '';
+      return;
+    }
+
+    if (!window.confirm("⚠️ ATTENTION MASTER ADMIN : Êtes-vous sûr de vouloir restaurer la base de données ? Toutes les données contenues dans le fichier seront importées dans la base de données.")) {
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      setBackupLoading(true);
+      setRestoreStatus("⏳ Code de sécurité validé. Restauration des données en cours dans la base de données...");
+      const text = await file.text();
+      const data = JSON.parse(text);
+      await restoreAppData(data);
+      setRestoreStatus("🎉 Restauration terminée avec succès ! La base de données contient désormais toutes les données restaurées.");
+    } catch (err: any) {
+      console.error("Restore failed", err);
+      setRestoreStatus("❌ Erreur lors de la restauration : " + (err.message || String(err)));
+    } finally {
+      setBackupLoading(false);
+      event.target.value = '';
+    }
+  };
+
   const handleExportPDF = () => {
     const doc = new jsPDF();
     const dateStr = new Date().toISOString().split('T')[0];
@@ -1334,6 +1402,16 @@ function App() {
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
                 Excel
               </button>
+              <button 
+                onClick={() => { setIsBackupModalOpen(true); setRestoreStatus(null); }} 
+                className="flex items-center gap-1.5 text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20 px-3 py-1.5 rounded-lg text-xs font-bold border border-purple-200 dark:border-purple-800 transition-colors"
+                title="Point de Restauration & Sauvegarde des Données"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                </svg>
+                Restauration
+              </button>
            </div>
            <div className="flex flex-wrap justify-end gap-x-3 gap-y-1 mt-1">
              <label className="flex items-center gap-1.5 text-[10px] font-bold text-gray-500 cursor-pointer hover:text-blue-600 transition-colors">
@@ -1800,6 +1878,89 @@ function App() {
               type="button"
               onClick={() => { setIsSessionsModalOpen(false); setSessionConfirmKickAll(false); setSessionSuccessMessage(''); }} 
               className="px-5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold shadow shadow-blue-500/20 active:scale-95 transition-all"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal isOpen={isBackupModalOpen} onClose={() => { setIsBackupModalOpen(false); setRestoreStatus(null); }} title="SAUVEGARDE & RESTAURATION DES DONNÉES">
+        <div className="space-y-4 text-left p-1">
+          <div className="bg-purple-50 dark:bg-purple-950/30 p-3 rounded-lg border border-purple-200 dark:border-purple-800 space-y-1 text-xs">
+            <h3 className="font-extrabold text-purple-900 dark:text-purple-200 flex items-center gap-1.5 uppercase text-xs">
+              <span>💾 Point de Restauration Complet du Système</span>
+            </h3>
+            <p className="text-purple-800 dark:text-purple-300 text-[11px] leading-relaxed">
+              Vous pouvez télécharger une sauvegarde complète de toutes les données du système (Mouvements de Stock, Produits, Entreprises, Clients) à la date d'aujourd'hui, ou importer un fichier de sauvegarde pour tout restaurer instantanément.
+            </p>
+          </div>
+
+          {restoreStatus && (
+            <div className="p-3 rounded-lg text-xs font-semibold bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200">
+              {restoreStatus}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            <div className="p-4 bg-white dark:bg-gray-800 border border-purple-200 dark:border-purple-900/50 rounded-xl space-y-3 flex flex-col justify-between shadow-sm">
+              <div className="space-y-1">
+                <span className="text-[10px] bg-purple-100 dark:bg-purple-900/50 text-purple-800 dark:text-purple-300 px-2 py-0.5 rounded font-bold uppercase">Option 1</span>
+                <h4 className="font-extrabold text-xs text-gray-800 dark:text-gray-200">Télécharger la Sauvegarde</h4>
+                <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                  Génère un fichier JSON sécurisé contenant toutes vos données actuelles. Conservez-le pour de futures restaurations.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={backupLoading}
+                onClick={handleDownloadBackup}
+                className="w-full py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-md shadow-purple-500/20 active:scale-95 transition-all flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                {backupLoading ? "Génération..." : "Télécharger le Point de Restauration"}
+              </button>
+            </div>
+
+            <div className="p-4 bg-white dark:bg-gray-800 border border-blue-200 dark:border-blue-900/50 rounded-xl space-y-3 flex flex-col justify-between shadow-sm">
+              <div className="space-y-2">
+                <span className="text-[10px] bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 px-2 py-0.5 rounded font-bold uppercase">Option 2</span>
+                <h4 className="font-extrabold text-xs text-gray-800 dark:text-gray-200">Restaurer un Fichier</h4>
+                <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                  Sélectionnez un fichier `.json` de sauvegarde précédemment téléchargé pour réimporter toutes vos données.
+                </p>
+                <div className="pt-1">
+                  <label className="block text-[10px] font-bold text-red-600 dark:text-red-400 mb-1">
+                    🔒 Code de Sécurité Master Admin (Obligatoire)
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="Saisissez le code (ex: 2026)"
+                    value={restoreSecurityCode}
+                    onChange={(e) => setRestoreSecurityCode(e.target.value)}
+                    className="w-full text-xs p-1.5 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100 font-mono tracking-widest focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+              </div>
+              <label className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold shadow-md shadow-blue-500/20 active:scale-95 transition-all flex items-center justify-center gap-2 cursor-pointer mt-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                <span>Charger & Restaurer Fichier</span>
+                <input 
+                  type="file" 
+                  accept=".json" 
+                  onChange={handleRestoreFromFile} 
+                  disabled={backupLoading} 
+                  className="hidden" 
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-3 border-t border-gray-100 dark:border-gray-700">
+            <button 
+              type="button"
+              onClick={() => { setIsBackupModalOpen(false); setRestoreStatus(null); }} 
+              className="px-5 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded text-xs font-bold transition-all"
             >
               Fermer
             </button>
