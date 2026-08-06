@@ -654,6 +654,104 @@ function App() {
     });
   }, [logs, searchLogQuery]);
 
+  const expiringDumList = useMemo(() => {
+    if (!processedTransactions || processedTransactions.length === 0) return [];
+
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+
+    const lotInTxsMap = new Map<string, Transaction[]>();
+    const lotOutTxsMap = new Map<string, Transaction[]>();
+
+    processedTransactions.forEach(t => {
+      const lot = (t.lot || '').trim().toUpperCase();
+      if (!lot) return;
+      if (t.type === TransactionType.IN) {
+        const list = lotInTxsMap.get(lot) || [];
+        list.push(t);
+        lotInTxsMap.set(lot, list);
+      } else {
+        const list = lotOutTxsMap.get(lot) || [];
+        list.push(t);
+        lotOutTxsMap.set(lot, list);
+      }
+    });
+
+    const results: {
+      lot: string;
+      product: string;
+      entreprise: string;
+      client: string;
+      availableQty: number;
+      unit: string;
+      expiryDate: string;
+      diffDays: number;
+    }[] = [];
+
+    const isEntSelected = appliedFilters.entreprise !== 'ALL';
+    const isCliSelected = appliedFilters.client !== 'ALL';
+
+    lotInTxsMap.forEach((inTxs, lot) => {
+      const outTxs = lotOutTxsMap.get(lot) || [];
+
+      const productMap = new Map<string, { inQty: number; outQty: number; expiryDate: string; entreprise: string; client: string; unit: string }>();
+
+      inTxs.forEach(t => {
+        if (isEntSelected && t.entreprise !== appliedFilters.entreprise) return;
+        if (isCliSelected && t.client !== appliedFilters.client) return;
+
+        const prodKey = (t.product || '').trim().toUpperCase();
+        const existing = productMap.get(prodKey) || {
+          inQty: 0,
+          outQty: 0,
+          expiryDate: t.expiryDate || '',
+          entreprise: t.entreprise || '',
+          client: t.client || '',
+          unit: t.unit || 'KG'
+        };
+        existing.inQty += t.qty;
+        if (t.expiryDate && (!existing.expiryDate || t.expiryDate < existing.expiryDate)) {
+          existing.expiryDate = t.expiryDate;
+        }
+        if (t.entreprise && !existing.entreprise) existing.entreprise = t.entreprise;
+        if (t.client && !existing.client) existing.client = t.client;
+        productMap.set(prodKey, existing);
+      });
+
+      outTxs.forEach(t => {
+        const prodKey = (t.product || '').trim().toUpperCase();
+        const existing = productMap.get(prodKey);
+        if (existing) {
+          existing.outQty += t.qty;
+        }
+      });
+
+      productMap.forEach((data, prodName) => {
+        const avail = data.inQty - data.outQty;
+        if (avail > 0.0001 && data.expiryDate) {
+          const exp = new Date(data.expiryDate);
+          exp.setHours(0, 0, 0, 0);
+          const diffDays = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+          if (diffDays < 30) {
+            results.push({
+              lot,
+              product: prodName,
+              entreprise: data.entreprise,
+              client: data.client,
+              availableQty: avail,
+              unit: data.unit,
+              expiryDate: data.expiryDate,
+              diffDays
+            });
+          }
+        }
+      });
+    });
+
+    return results.sort((a, b) => a.diffDays - b.diffDays);
+  }, [processedTransactions, appliedFilters]);
+
   const handleExportExcel = () => {
     let csvContent = "\uFEFF"; 
     const sep = ";";
@@ -1249,6 +1347,79 @@ function App() {
            </div>
         </div>
       </header>
+
+      {/* EXPIRING STOCK RED ALERT BANNER */}
+      {expiringDumList.length > 0 && (
+        <div className="bg-red-600 dark:bg-red-950 text-white px-6 py-3 shadow-lg border-b border-red-700 dark:border-red-800 z-15 flex-none transition-all">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white/20 rounded-lg text-xl leading-none shadow-sm flex-shrink-0">
+                ⚠️
+              </div>
+              <div>
+                <h2 className="text-sm font-extrabold uppercase tracking-wide flex items-center gap-2 flex-wrap">
+                  <span>ALERTE STOCK EN PÉREMPTION (&lt; 30 JOURS)</span>
+                  <span className="bg-white text-red-700 font-black text-xs px-2.5 py-0.5 rounded-full shadow-sm">
+                    {expiringDumList.length} DUM{expiringDumList.length > 1 ? 's' : ''} concerné{expiringDumList.length > 1 ? 's' : ''}
+                  </span>
+                </h2>
+                <p className="text-[11px] text-red-100 font-medium mt-0.5">
+                  DUMs actuellement en stock ayant une Date Limite/Péremption inférieure à 30 jours ou déjà périmés :
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2.5 pt-2.5 border-t border-white/20 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5 max-h-48 overflow-y-auto custom-scrollbar">
+            {expiringDumList.map((item, idx) => {
+              const formattedDate = formatDate(item.expiryDate);
+              return (
+                <div 
+                  key={`${item.lot}_${item.product}_${idx}`}
+                  className="bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-lg p-2.5 border border-white/20 flex justify-between items-center text-xs transition-all shadow-sm"
+                >
+                  <div className="space-y-1 min-w-0 flex-1 pr-2">
+                    <div className="font-bold flex items-center gap-1.5 truncate">
+                      <span className="bg-white text-red-800 text-[10px] px-1.5 py-0.5 rounded font-mono font-black shadow-sm">
+                        {item.lot}
+                      </span>
+                      <span className="truncate text-white text-[11px] font-extrabold">{item.product}</span>
+                    </div>
+                    <div className="text-[10px] text-red-100 flex items-center gap-1.5 font-medium">
+                      <span>Stock: <strong className="underline">{formatNum(item.availableQty, 2)} {item.unit}</strong></span>
+                      {item.entreprise && <span className="truncate">• {item.entreprise}</span>}
+                    </div>
+                  </div>
+
+                  <div className="text-right flex-none pl-2 border-l border-white/20">
+                    <div className="text-[10px] font-bold text-red-100">DLV: {formattedDate}</div>
+                    <div className="text-[10px] font-black uppercase text-amber-200">
+                      {item.diffDays < 0 
+                        ? `⛔ Périmé (${Math.abs(item.diffDays)}j)` 
+                        : item.diffDays === 0 
+                        ? '🚨 Aujourd\'hui' 
+                        : `⏳ Reste ${item.diffDays}j`
+                      }
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFilterLot(item.lot);
+                        setAppliedFilters(prev => ({ ...prev, lot: item.lot }));
+                        setFiltersApplied(true);
+                        setSelectedStockKey(null);
+                      }}
+                      className="mt-1 text-[9px] bg-white text-red-800 hover:bg-red-50 active:scale-95 font-bold px-2 py-0.5 rounded shadow-sm transition-all"
+                    >
+                      Filtrer DUM
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="bg-white dark:bg-gray-800 px-6 py-3 shadow-sm border-b border-gray-200 dark:border-gray-700 z-10 flex-none transition-colors">
         <div className="flex flex-col md:flex-row md:items-end gap-3">
